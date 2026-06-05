@@ -28,6 +28,24 @@ const routes: RouteRecordRaw[] = [
     name: 'History',
     component: () => import('@/views/History.vue'),
     meta: { title: '历史数据' }
+  },
+  {
+    path: '/battery-config',
+    name: 'BatteryConfig',
+    component: () => import('@/views/BatteryConfig.vue'),
+    meta: { title: '电池参数配置' }
+  },
+  {
+    path: '/battery-degradation',
+    name: 'BatteryDegradation',
+    component: () => import('@/views/BatteryDegradation.vue'),
+    meta: { title: '电池衰减模型' }
+  },
+  {
+    path: '/transformer-demand',
+    name: 'TransformerDemand',
+    component: () => import('@/views/TransformerDemand.vue'),
+    meta: { title: '变压器需量管理' }
   }
 ]
 
