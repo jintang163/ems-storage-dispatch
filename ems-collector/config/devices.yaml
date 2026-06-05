@@ -1,0 +1,685 @@
+devices:
+  - device_sn: MTR-001
+    device_type: meter
+    name: 总进线电表
+    protocol: modbus-tcp
+    host: 192.168.1.10
+    port: 502
+    slave_id: 1
+    location: 配电房
+    sampling_interval: 5000
+    enabled: true
+    points:
+      - name: voltage_a
+        address: 0
+        count: 2
+        data_type: float32
+        scale: 0.01
+        unit: V
+      - name: voltage_b
+        address: 2
+        count: 2
+        data_type: float32
+        scale: 0.01
+        unit: V
+      - name: voltage_c
+        address: 4
+        count: 2
+        data_type: float32
+        scale: 0.01
+        unit: V
+      - name: current_a
+        address: 6
+        count: 2
+        data_type: float32
+        scale: 0.001
+        unit: A
+      - name: current_b
+        address: 8
+        count: 2
+        data_type: float32
+        scale: 0.001
+        unit: A
+      - name: current_c
+        address: 10
+        count: 2
+        data_type: float32
+        scale: 0.001
+        unit: A
+      - name: active_power
+        address: 12
+        count: 2
+        data_type: float32
+        scale: 0.01
+        unit: kW
+      - name: reactive_power
+        address: 14
+        count: 2
+        data_type: float32
+        scale: 0.01
+        unit: kVar
+      - name: apparent_power
+        address: 16
+        count: 2
+        data_type: float32
+        scale: 0.01
+        unit: kVA
+      - name: power_factor
+        address: 18
+        count: 2
+        data_type: float32
+        scale: 0.001
+        unit: ''
+      - name: frequency
+        address: 20
+        count: 2
+        data_type: float32
+        scale: 0.01
+        unit: Hz
+      - name: total_active_energy
+        address: 22
+        count: 4
+        data_type: float64
+        scale: 0.01
+        unit: kWh
+      - name: total_reactive_energy
+        address: 26
+        count: 4
+        data_type: float64
+        scale: 0.01
+        unit: kVarh
+      - name: import_active_energy
+        address: 30
+        count: 4
+        data_type: float64
+        scale: 0.01
+        unit: kWh
+      - name: export_active_energy
+        address: 34
+        count: 4
+        data_type: float64
+        scale: 0.01
+        unit: kWh
+      - name: demand
+        address: 38
+        count: 2
+        data_type: float32
+        scale: 0.01
+        unit: kW
+      - name: thd_voltage_a
+        address: 40
+        count: 2
+        data_type: float32
+        scale: 0.01
+        unit: '%'
+      - name: thd_current_a
+        address: 42
+        count: 2
+        data_type: float32
+        scale: 0.01
+        unit: '%'
+
+  - device_sn: PV-001
+    device_type: pv
+    name: 屋顶光伏逆变器
+    protocol: modbus-tcp
+    host: 192.168.1.20
+    port: 502
+    slave_id: 3
+    location: 屋顶
+    sampling_interval: 10000
+    enabled: true
+    points:
+      - name: dc_voltage
+        address: 0
+        count: 2
+        data_type: float32
+        scale: 0.1
+        unit: V
+      - name: dc_current
+        address: 2
+        count: 2
+        data_type: float32
+        scale: 0.01
+        unit: A
+      - name: dc_power
+        address: 4
+        count: 2
+        data_type: float32
+        scale: 0.1
+        unit: W
+      - name: ac_voltage_a
+        address: 6
+        count: 2
+        data_type: float32
+        scale: 0.1
+        unit: V
+      - name: ac_voltage_b
+        address: 8
+        count: 2
+        data_type: float32
+        scale: 0.1
+        unit: V
+      - name: ac_voltage_c
+        address: 10
+        count: 2
+        data_type: float32
+        scale: 0.1
+        unit: V
+      - name: ac_current_a
+        address: 12
+        count: 2
+        data_type: float32
+        scale: 0.01
+        unit: A
+      - name: ac_current_b
+        address: 14
+        count: 2
+        data_type: float32
+        scale: 0.01
+        unit: A
+      - name: ac_current_c
+        address: 16
+        count: 2
+        data_type: float32
+        scale: 0.01
+        unit: A
+      - name: ac_power
+        address: 18
+        count: 2
+        data_type: float32
+        scale: 0.1
+        unit: W
+      - name: ac_reactive_power
+        address: 20
+        count: 2
+        data_type: float32
+        scale: 0.1
+        unit: Var
+      - name: power_factor
+        address: 22
+        count: 2
+        data_type: float32
+        scale: 0.001
+        unit: ''
+      - name: frequency
+        address: 24
+        count: 2
+        data_type: float32
+        scale: 0.01
+        unit: Hz
+      - name: efficiency
+        address: 26
+        count: 2
+        data_type: float32
+        scale: 0.01
+        unit: '%'
+      - name: total_energy
+        address: 28
+        count: 4
+        data_type: float64
+        scale: 0.1
+        unit: kWh
+      - name: daily_energy
+        address: 32
+        count: 2
+        data_type: float32
+        scale: 0.01
+        unit: kWh
+      - name: module_temperature
+        address: 34
+        count: 2
+        data_type: float32
+        scale: 0.1
+        unit: "°C"
+      - name: ambient_temperature
+        address: 36
+        count: 2
+        data_type: float32
+        scale: 0.1
+        unit: "°C"
+      - name: irradiance
+        address: 38
+        count: 2
+        data_type: float32
+        scale: 1
+        unit: "W/m²"
+      - name: operating_status
+        address: 40
+        count: 1
+        data_type: uint16
+        scale: 1
+        unit: ''
+      - name: fault_code
+        address: 41
+        count: 1
+        data_type: uint16
+        scale: 1
+        unit: ''
+
+  - device_sn: BMS-001
+    device_type: bms
+    name: 储能柜BMS
+    protocol: modbus-tcp
+    host: 192.168.1.30
+    port: 502
+    slave_id: 4
+    location: 储能室
+    sampling_interval: 3000
+    enabled: true
+    points:
+      - name: soc
+        address: 0
+        count: 2
+        data_type: float32
+        scale: 0.01
+        unit: '%'
+      - name: soh
+        address: 2
+        count: 2
+        data_type: float32
+        scale: 0.01
+        unit: '%'
+      - name: total_voltage
+        address: 4
+        count: 2
+        data_type: float32
+        scale: 0.01
+        unit: V
+      - name: total_current
+        address: 6
+        count: 2
+        data_type: float32
+        scale: 0.01
+        unit: A
+      - name: max_cell_voltage
+        address: 8
+        count: 2
+        data_type: float32
+        scale: 0.001
+        unit: V
+      - name: min_cell_voltage
+        address: 10
+        count: 2
+        data_type: float32
+        scale: 0.001
+        unit: V
+      - name: max_cell_voltage_no
+        address: 12
+        count: 1
+        data_type: uint16
+        scale: 1
+        unit: ''
+      - name: min_cell_voltage_no
+        address: 13
+        count: 1
+        data_type: uint16
+        scale: 1
+        unit: ''
+      - name: avg_cell_voltage
+        address: 14
+        count: 2
+        data_type: float32
+        scale: 0.001
+        unit: V
+      - name: max_temperature
+        address: 16
+        count: 2
+        data_type: float32
+        scale: 0.1
+        unit: "°C"
+      - name: min_temperature
+        address: 18
+        count: 2
+        data_type: float32
+        scale: 0.1
+        unit: "°C"
+      - name: avg_temperature
+        address: 20
+        count: 2
+        data_type: float32
+        scale: 0.1
+        unit: "°C"
+      - name: max_temp_no
+        address: 22
+        count: 1
+        data_type: uint16
+        scale: 1
+        unit: ''
+      - name: min_temp_no
+        address: 23
+        count: 1
+        data_type: uint16
+        scale: 1
+        unit: ''
+      - name: charge_current_limit
+        address: 24
+        count: 2
+        data_type: float32
+        scale: 0.01
+        unit: A
+      - name: discharge_current_limit
+        address: 26
+        count: 2
+        data_type: float32
+        scale: 0.01
+        unit: A
+      - name: max_charge_power
+        address: 28
+        count: 2
+        data_type: float32
+        scale: 0.1
+        unit: kW
+      - name: max_discharge_power
+        address: 30
+        count: 2
+        data_type: float32
+        scale: 0.1
+        unit: kW
+      - name: cycle_count
+        address: 32
+        count: 2
+        data_type: uint16
+        scale: 1
+        unit: 次
+      - name: capacity
+        address: 34
+        count: 2
+        data_type: float32
+        scale: 0.01
+        unit: Ah
+      - name: remaining_capacity
+        address: 36
+        count: 2
+        data_type: float32
+        scale: 0.01
+        unit: Ah
+      - name: design_capacity
+        address: 38
+        count: 2
+        data_type: float32
+        scale: 0.01
+        unit: Ah
+      - name: bms_status
+        address: 40
+        count: 1
+        data_type: uint16
+        scale: 1
+        unit: ''
+      - name: charge_enable
+        address: 41
+        count: 1
+        data_type: uint16
+        scale: 1
+        unit: ''
+      - name: discharge_enable
+        address: 42
+        count: 1
+        data_type: uint16
+        scale: 1
+        unit: ''
+      - name: heating_enable
+        address: 43
+        count: 1
+        data_type: uint16
+        scale: 1
+        unit: ''
+      - name: fault_code
+        address: 44
+        count: 2
+        data_type: uint32
+        scale: 1
+        unit: ''
+      - name: warning_code
+        address: 46
+        count: 2
+        data_type: uint32
+        scale: 1
+        unit: ''
+      - name: protection_code
+        address: 48
+        count: 2
+        data_type: uint32
+        scale: 1
+        unit: ''
+      - name: cell_count
+        address: 50
+        count: 1
+        data_type: uint16
+        scale: 1
+        unit: 节
+      - name: temp_sensor_count
+        address: 51
+        count: 1
+        data_type: uint16
+        scale: 1
+        unit: 个
+
+  - device_sn: PCS-001
+    device_type: pcs
+    name: 储能变流器
+    protocol: modbus-tcp
+    host: 192.168.1.31
+    port: 502
+    slave_id: 5
+    location: 储能室
+    sampling_interval: 3000
+    enabled: true
+    points:
+      - name: dc_voltage
+        address: 0
+        count: 2
+        data_type: float32
+        scale: 0.1
+        unit: V
+      - name: dc_current
+        address: 2
+        count: 2
+        data_type: float32
+        scale: 0.01
+        unit: A
+      - name: dc_power
+        address: 4
+        count: 2
+        data_type: float32
+        scale: 0.1
+        unit: kW
+      - name: ac_voltage_a
+        address: 6
+        count: 2
+        data_type: float32
+        scale: 0.1
+        unit: V
+      - name: ac_voltage_b
+        address: 8
+        count: 2
+        data_type: float32
+        scale: 0.1
+        unit: V
+      - name: ac_voltage_c
+        address: 10
+        count: 2
+        data_type: float32
+        scale: 0.1
+        unit: V
+      - name: ac_current_a
+        address: 12
+        count: 2
+        data_type: float32
+        scale: 0.01
+        unit: A
+      - name: ac_current_b
+        address: 14
+        count: 2
+        data_type: float32
+        scale: 0.01
+        unit: A
+      - name: ac_current_c
+        address: 16
+        count: 2
+        data_type: float32
+        scale: 0.01
+        unit: A
+      - name: active_power
+        address: 18
+        count: 2
+        data_type: float32
+        scale: 0.1
+        unit: kW
+      - name: reactive_power
+        address: 20
+        count: 2
+        data_type: float32
+        scale: 0.1
+        unit: kVar
+      - name: apparent_power
+        address: 22
+        count: 2
+        data_type: float32
+        scale: 0.1
+        unit: kVA
+      - name: power_factor
+        address: 24
+        count: 2
+        data_type: float32
+        scale: 0.001
+        unit: ''
+      - name: frequency
+        address: 26
+        count: 2
+        data_type: float32
+        scale: 0.01
+        unit: Hz
+      - name: efficiency
+        address: 28
+        count: 2
+        data_type: float32
+        scale: 0.01
+        unit: '%'
+      - name: total_charge_energy
+        address: 30
+        count: 4
+        data_type: float64
+        scale: 0.1
+        unit: kWh
+      - name: total_discharge_energy
+        address: 34
+        count: 4
+        data_type: float64
+        scale: 0.1
+        unit: kWh
+      - name: daily_charge_energy
+        address: 38
+        count: 2
+        data_type: float32
+        scale: 0.1
+        unit: kWh
+      - name: daily_discharge_energy
+        address: 40
+        count: 2
+        data_type: float32
+        scale: 0.1
+        unit: kWh
+      - name: grid_voltage
+        address: 42
+        count: 2
+        data_type: float32
+        scale: 0.1
+        unit: V
+      - name: grid_frequency
+        address: 44
+        count: 2
+        data_type: float32
+        scale: 0.01
+        unit: Hz
+      - name: inverter_temperature
+        address: 46
+        count: 2
+        data_type: float32
+        scale: 0.1
+        unit: "°C"
+      - name: heat_sink_temperature
+        address: 48
+        count: 2
+        data_type: float32
+        scale: 0.1
+        unit: "°C"
+      - name: running_status
+        address: 50
+        count: 1
+        data_type: uint16
+        scale: 1
+        unit: ''
+      - name: work_mode
+        address: 51
+        count: 1
+        data_type: uint16
+        scale: 1
+        unit: ''
+      - name: control_mode
+        address: 52
+        count: 1
+        data_type: uint16
+        scale: 1
+        unit: ''
+      - name: power_setpoint
+        address: 53
+        count: 2
+        data_type: float32
+        scale: 0.1
+        unit: kW
+      - name: reactive_power_setpoint
+        address: 55
+        count: 2
+        data_type: float32
+        scale: 0.1
+        unit: kVar
+      - name: grid_connect_status
+        address: 57
+        count: 1
+        data_type: uint16
+        scale: 1
+        unit: ''
+      - name: fault_code
+        address: 58
+        count: 2
+        data_type: uint32
+        scale: 1
+        unit: ''
+      - name: warning_code
+        address: 60
+        count: 2
+        data_type: uint32
+        scale: 1
+        unit: ''
+      - name: dc_max_voltage
+        address: 62
+        count: 2
+        data_type: float32
+        scale: 0.1
+        unit: V
+      - name: dc_min_voltage
+        address: 64
+        count: 2
+        data_type: float32
+        scale: 0.1
+        unit: V
+      - name: ac_max_current
+        address: 66
+        count: 2
+        data_type: float32
+        scale: 0.01
+        unit: A
+
+cache:
+  enabled: true
+  path: ./data/cache
+  max_file_size: 104857600
+  retry_interval: 60
+
+simulation:
+  enabled: true
+  mode: random
+
+mqtt:
+  command_topic: ems/device/command

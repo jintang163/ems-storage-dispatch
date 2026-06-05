@@ -1,0 +1,138 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: ems-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ems
+      POSTGRES_USER: ems
+      POSTGRES_PASSWORD: ems123456
+      TZ: Asia/Shanghai
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./ems-web/src/main/resources/db:/docker-entrypoint-initdb.d
+    networks:
+      - ems-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ems"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  influxdb:
+    image: influxdb:2.7-alpine
+    container_name: ems-influxdb
+    restart: unless-stopped
+    environment:
+      DOCKER_INFLUXDB_INIT_MODE: setup
+      DOCKER_INFLUXDB_INIT_USERNAME: admin
+      DOCKER_INFLUXDB_INIT_PASSWORD: admin123456
+      DOCKER_INFLUXDB_INIT_ORG: ems
+      DOCKER_INFLUXDB_INIT_BUCKET: ems
+      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: ems-token-123456
+      TZ: Asia/Shanghai
+    ports:
+      - "8086:8086"
+    volumes:
+      - influxdb-data:/var/lib/influxdb2
+    networks:
+      - ems-network
+    healthcheck:
+      test: ["CMD", "influx", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  emqx:
+    image: emqx/emqx:5.3.0
+    container_name: ems-emqx
+    restart: unless-stopped
+    environment:
+      EMQX_NAME: emqx
+      EMQX_HOST: 127.0.0.1
+      TZ: Asia/Shanghai
+    ports:
+      - "1883:1883"
+      - "8883:8883"
+      - "8083:8083"
+      - "8084:8084"
+      - "18083:18083"
+    volumes:
+      - emqx-data:/opt/emqx/data
+      - emqx-log:/opt/emqx/log
+    networks:
+      - ems-network
+    healthcheck:
+      test: ["CMD", "emqx", "ctl", "status"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  ems-backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: ems-backend
+    restart: unless-stopped
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+      TZ: Asia/Shanghai
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      influxdb:
+        condition: service_healthy
+      emqx:
+        condition: service_healthy
+    networks:
+      - ems-network
+
+  ems-frontend:
+    build:
+      context: ./ems-webapp
+      dockerfile: Dockerfile.frontend
+    container_name: ems-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:80"
+    depends_on:
+      - ems-backend
+    networks:
+      - ems-network
+
+  ems-collector:
+    build:
+      context: ./ems-collector
+      dockerfile: Dockerfile.collector
+    container_name: ems-collector
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
+      CONFIG_PATH: /app/config/devices.yaml
+      MQTT_BROKER: emqx
+      MQTT_PORT: 1883
+    depends_on:
+      emqx:
+        condition: service_healthy
+    volumes:
+      - ./ems-collector/config:/app/config
+      - collector-cache:/app/data
+    networks:
+      - ems-network
+
+volumes:
+  postgres-data:
+  influxdb-data:
+  emqx-data:
+  emqx-log:
+  collector-cache:
+
+networks:
+  ems-network:
+    driver: bridge

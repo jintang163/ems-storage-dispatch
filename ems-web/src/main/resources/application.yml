@@ -1,0 +1,88 @@
+server:
+  port: 8080
+  servlet:
+    context-path: /ems
+
+spring:
+  application:
+    name: ems-storage-dispatch
+
+  datasource:
+    driver-class-name: org.postgresql.Driver
+    url: jdbc:postgresql://localhost:5432/ems?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai
+    username: ems
+    password: ems123456
+    hikari:
+      minimum-idle: 5
+      maximum-pool-size: 20
+      idle-timeout: 30000
+      connection-timeout: 30000
+      max-lifetime: 1800000
+
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+        format_sql: true
+    open-in-view: false
+
+  sql:
+    init:
+      mode: always
+      schema-locations: classpath:db/schema.sql
+      data-locations: classpath:db/data.sql
+
+  servlet:
+    multipart:
+      max-file-size: 10MB
+      max-request-size: 10MB
+
+influxdb:
+  url: http://localhost:8086
+  token: ems-token-secret-key
+  org: ems
+  bucket: ems-data
+  timeout: 30s
+
+mqtt:
+  broker-url: tcp://localhost:1883
+  username: ems
+  password: ems123456
+  client-id: ems-server
+  input-topics:
+    - ems/device/meter/+/data
+    - ems/device/pv/+/data
+    - ems/device/bms/+/data
+    - ems/device/pcs/+/data
+    - ems/device/+/status
+  output-topic: ems/device/command
+  timeout: 30000
+  keep-alive: 60
+
+cache:
+  offline:
+    enabled: true
+    path: ./data/cache
+    max-file-size: 100MB
+    retry-interval: 60000
+
+logging:
+  level:
+    com.ems: debug
+    org.springframework.integration: info
+  file:
+    name: ./logs/ems.log
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n"
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: always

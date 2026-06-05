@@ -1,0 +1,54 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: ems-storage-dispatch
+
+  datasource:
+    url: jdbc:postgresql://postgres:5432/ems
+    username: ems
+    password: ems123456
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      maximum-pool-size: 20
+      minimum-idle: 5
+      connection-timeout: 30000
+
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+        format_sql: true
+
+  influxdb:
+    url: http://influxdb:8086
+    token: ems-token-123456
+    org: ems
+    bucket: ems
+
+  mqtt:
+    url: tcp://emqx:1883
+    username:
+    password:
+    client-id: ems-backend
+    topics:
+      - ems/device/meter/+/data
+      - ems/device/pv/+/data
+      - ems/device/bms/+/data
+      - ems/device/pcs/+/data
+      - ems/device/+/status
+
+  cache:
+    offline:
+      enabled: true
+      path: ./data/offline
+      max-file-size: 104857600
+
+logging:
+  level:
+    com.ems: INFO
+    org.springframework.integration: INFO

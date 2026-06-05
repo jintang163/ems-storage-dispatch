@@ -1,0 +1,35 @@
+FROM maven:3.9.6-eclipse-temurin-17 AS builder
+
+WORKDIR /app
+
+COPY pom.xml .
+COPY ems-common/pom.xml ./ems-common/
+COPY ems-domain/pom.xml ./ems-domain/
+COPY ems-influxdb/pom.xml ./ems-influxdb/
+COPY ems-mqtt/pom.xml ./ems-mqtt/
+COPY ems-service/pom.xml ./ems-service/
+COPY ems-web/pom.xml ./ems-web/
+
+RUN mvn dependency:go-offline -B
+
+COPY ems-common/src ./ems-common/src
+COPY ems-domain/src ./ems-domain/src
+COPY ems-influxdb/src ./ems-influxdb/src
+COPY ems-mqtt/src ./ems-mqtt/src
+COPY ems-service/src ./ems-service/src
+COPY ems-web/src ./ems-web/src
+
+RUN mvn clean package -DskipTests -B
+
+FROM eclipse-temurin:17-jre-alpine
+
+WORKDIR /app
+
+RUN apk add --no-cache tzdata
+ENV TZ=Asia/Shanghai
+
+COPY --from=builder /app/ems-web/target/ems-web-1.0.0.jar app.jar
+
+EXPOSE 8080
+
+ENTRYPOINT ["java", "-jar", "app.jar"]
