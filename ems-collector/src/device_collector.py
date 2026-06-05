@@ -6,7 +6,6 @@ from dataclasses import dataclass
 
 from .config import DeviceConfig
 from .modbus_client import ModbusClient
-from .data_simulator import DataSimulator
 from .mqtt_publisher import MqttPublisher
 
 logger = logging.getLogger(__name__)
@@ -23,14 +22,11 @@ class CollectorStatus:
 
 class DeviceCollector:
     def __init__(self, device_config: DeviceConfig,
-                 mqtt_publisher: MqttPublisher,
-                 simulation_enabled: bool = False):
+                 mqtt_publisher: MqttPublisher):
         self.config = device_config
         self.mqtt_publisher = mqtt_publisher
-        self.simulation_enabled = simulation_enabled
 
         self.modbus_client: ModbusClient | None = None
-        self.simulator: DataSimulator | None = None
         self.collector_thread: Thread | None = None
         self.stop_event = Event()
         self.status = CollectorStatus()
@@ -43,16 +39,10 @@ class DeviceCollector:
         }
         self.status_topic = f"ems/device/{device_config.device_sn}/status"
 
-        if self.simulation_enabled:
-            self.simulator = DataSimulator(
-                device_type=device_config.device_type,
-                location=device_config.location
-            )
-        else:
-            self.modbus_client = ModbusClient(
-                host=device_config.host,
-                port=device_config.port
-            )
+        self.modbus_client = ModbusClient(
+            host=device_config.host,
+            port=device_config.port
+        )
 
     def _get_topic(self) -> str:
         return self.topic_map.get(self.config.device_type, '')
@@ -110,12 +100,6 @@ class DeviceCollector:
             self.stop_event.wait(interval)
 
     def _collect_data(self) -> Dict[str, Any] | None:
-        if self.simulation_enabled and self.simulator:
-            data = self.simulator.generate_data()
-            data['deviceSn'] = self.config.device_sn
-            data['location'] = self.config.location
-            return data
-
         if not self.modbus_client:
             return None
 
@@ -171,21 +155,20 @@ class DeviceCollector:
         self.mqtt_publisher.publish(self.status_topic, payload)
 
     def apply_command(self, command: str, params: Dict[str, Any]):
-        if self.simulator:
-            self.simulator.apply_command(command, params)
-            logger.info(f"Applied simulated command to {self.config.device_sn}: {command}")
-        elif self.modbus_client:
-            try:
-                if command == 'POWER_CONTROL' and 'targetPower' in params:
-                    self._write_power_control(params['targetPower'])
-                elif command == 'START_CHARGE':
-                    self._write_start_charge(params.get('power', 0))
-                elif command == 'START_DISCHARGE':
-                    self._write_start_discharge(params.get('power', 0))
-                elif command == 'STOP':
-                    self._write_stop()
-            except Exception as e:
-                logger.error(f"Failed to apply command to {self.config.device_sn}: {e}")
+        if not self.modbus_client:
+            logger.warning(f"No Modbus client available for {self.config.device_sn}")
+            return
+        try:
+            if command == 'POWER_CONTROL' and 'targetPower' in params:
+                self._write_power_control(params['targetPower'])
+            elif command == 'START_CHARGE':
+                self._write_start_charge(params.get('power', 0))
+            elif command == 'START_DISCHARGE':
+                self._write_start_discharge(params.get('power', 0))
+            elif command == 'STOP':
+                self._write_stop()
+        except Exception as e:
+            logger.error(f"Failed to apply command to {self.config.device_sn}: {e}")
 
     def _write_power_control(self, target_power: float):
         if not self.modbus_client or not self.modbus_client.is_connected():
@@ -252,5 +235,5 @@ class DeviceCollector:
             'collect_count': self.status.collect_count,
             'error_count': self.status.error_count,
             'last_error': self.status.last_error,
-            'connected': self.modbus_client.is_connected() if self.modbus_client else self.simulation_enabled
+            'connected': self.modbus_client.is_connected() if self.modbus_client else False
         }

@@ -65,8 +65,7 @@ class CollectorService:
 
             collector = DeviceCollector(
                 device_config=device_config,
-                mqtt_publisher=self.mqtt_publisher,
-                simulation_enabled=self.config.simulation.enabled
+                mqtt_publisher=self.mqtt_publisher
             )
             self.collectors[device_config.device_sn] = collector
             logger.info(f"Initialized collector for device: {device_config.device_sn}")
@@ -142,8 +141,7 @@ class CollectorService:
                 for sn, collector in self.collectors.items()
             },
             'mqtt_connected': self.mqtt_publisher.is_connected(),
-            'cache_enabled': self.cache_manager.enabled,
-            'simulation_mode': self.config.simulation.enabled
+            'cache_enabled': self.cache_manager.enabled
         }
 
     def _signal_handler(self, signum, frame):

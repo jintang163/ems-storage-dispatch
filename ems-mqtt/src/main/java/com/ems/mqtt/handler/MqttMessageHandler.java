@@ -20,15 +20,52 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
 
+/**
+ * MQTT消息处理器
+ * 负责接收Python采集端通过MQTT协议上报的设备实时数据，并进行以下处理：
+ * 1. 根据主题区分消息类型（状态上报、电表数据、光伏数据、BMS数据、PCS数据）
+ * 2. 解析JSON消息体，通过@JSONField注解映射Python snake_case字段到Java camelCase
+ * 3. 将数据转换为InfluxDB实体对象
+ * 4. 异步写入时序数据库进行持久化存储
+ * 5. 更新实时数据缓存，供前端查询展示
+ * 6. 更新设备在线状态
+ *
+ * 数据链路：Python采集端 -> MQTT Broker -> MqttMessageHandler -> InfluxDB + Cache
+ *
+ * @author EMS Team
+ * @since 1.0.0
+ */
 @Slf4j
 @Component
 @RequiredArgsConstructor
 public class MqttMessageHandler {
 
+    /**
+     * 时序数据库服务，负责异步写入InfluxDB
+     */
     private final TimeSeriesService timeSeriesService;
+
+    /**
+     * 实时数据缓存，存储最新的设备数据供前端快速查询
+     */
     private final RealtimeDataCache realtimeDataCache;
+
+    /**
+     * 设备数据仓库，负责PostgreSQL中设备状态的更新
+     */
     private final DeviceRepository deviceRepository;
 
+    /**
+     * MQTT消息入口方法
+     * Spring Integration通过@ServiceActivator自动将mqttInputChannel通道的消息路由到此方法
+     * 处理流程：
+     * 1. 从消息头获取MQTT主题
+     * 2. 根据主题模式分发给对应的处理方法
+     * 3. 发生异常时记录日志并抛出，由事务管理器回滚
+     *
+     * @param message MQTT消息，包含消息头（主题等元数据）和消息体（JSON数据）
+     * @throws EmsException 消息处理失败时抛出
+     */
     @ServiceActivator(inputChannel = "mqttInputChannel")
     @Transactional(rollbackFor = Exception.class)
     public void handleMessage(Message<String> message) {
@@ -63,6 +100,14 @@ public class MqttMessageHandler {
         }
     }
 
+    /**
+     * 处理设备状态消息
+     * 当设备上线、离线或状态变更时触发，更新PostgreSQL中设备的运行状态
+     * 优先从主题中提取设备编号，若主题解析失败则从消息体中获取
+     *
+     * @param topic   MQTT主题，格式：ems/device/{deviceSn}/status
+     * @param payload JSON消息体，包含设备状态信息
+     */
     private void handleStatusMessage(String topic, String payload) {
         DeviceStatusPayload status = JSON.parseObject(payload, DeviceStatusPayload.class);
         String deviceSn = TopicUtils.extractDeviceSnFromTopic(topic);
@@ -80,6 +125,20 @@ public class MqttMessageHandler {
         }
     }
 
+    /**
+     * 处理电表数据
+     * 接收电表实时采集的电压、电流、功率、电能、谐波等数据
+     * 处理流程：
+     * 1. 使用fastjson2解析JSON消息体到MeterDataPayload（自动映射snake_case到camelCase）
+     * 2. 提取设备编号
+     * 3. 将DTO转换为InfluxDB实体对象MeterData
+     * 4. 异步写入InfluxDB时序数据库
+     * 5. 更新实时数据缓存
+     * 6. 更新设备在线状态
+     *
+     * @param topic   MQTT主题，格式：ems/device/meter/{deviceSn}/data
+     * @param payload JSON消息体，包含电表采集的所有用电数据
+     */
     private void handleMeterData(String topic, String payload) {
         MeterDataPayload dataPayload = JSON.parseObject(payload, MeterDataPayload.class);
         String deviceSn = TopicUtils.extractDeviceSnFromTopic(topic);
@@ -121,6 +180,14 @@ public class MqttMessageHandler {
         deviceRepository.updateStatus(deviceSn, EmsConstants.DEVICE_STATUS_ONLINE, LocalDateTime.now());
     }
 
+    /**
+     * 处理光伏逆变器数据
+     * 接收光伏逆变器采集的直流侧、交流侧、发电量、温度等数据
+     * 处理流程与handleMeterData一致
+     *
+     * @param topic   MQTT主题，格式：ems/device/pv/{deviceSn}/data
+     * @param payload JSON消息体，包含光伏逆变器采集数据
+     */
     private void handlePvData(String topic, String payload) {
         PvDataPayload dataPayload = JSON.parseObject(payload, PvDataPayload.class);
         String deviceSn = TopicUtils.extractDeviceSnFromTopic(topic);
@@ -165,6 +232,15 @@ public class MqttMessageHandler {
         deviceRepository.updateStatus(deviceSn, EmsConstants.DEVICE_STATUS_ONLINE, LocalDateTime.now());
     }
 
+    /**
+     * 处理BMS电池管理系统数据
+     * 接收BMS采集的SOC、SOH、电压、电流、温度、告警等数据
+     * BMS数据是储能系统安全运行的关键，包含电池状态用于充放电控制决策的重要依据
+     * 处理流程与handleMeterData一致
+     *
+     * @param topic   MQTT主题，格式：ems/device/bms/{deviceSn}/data
+     * @param payload JSON消息体，包含BMS采集数据
+     */
     private void handleBmsData(String topic, String payload) {
         BmsDataPayload dataPayload = JSON.parseObject(payload, BmsDataPayload.class);
         String deviceSn = TopicUtils.extractDeviceSnFromTopic(topic);
@@ -219,6 +295,16 @@ public class MqttMessageHandler {
         deviceRepository.updateStatus(deviceSn, EmsConstants.DEVICE_STATUS_ONLINE, LocalDateTime.now());
     }
 
+    /**
+     * 处理PCS储能变流器数据
+     * 接收PCS采集的充放电功率、运行状态、并网状态等数据
+     * PCS是储能系统的核心执行设备，负责电池与电网之间的能量转换
+     * activePower字段正负值含义：正值表示放电（电池向电网送电），负值表示充电（电网向电池充电）
+     * 处理流程与handleMeterData一致
+     *
+     * @param topic   MQTT主题，格式：ems/device/pcs/{deviceSn}/data
+     * @param payload JSON消息体，包含PCS采集数据
+     */
     private void handlePcsData(String topic, String payload) {
         PcsDataPayload dataPayload = JSON.parseObject(payload, PcsDataPayload.class);
         String deviceSn = TopicUtils.extractDeviceSnFromTopic(topic);

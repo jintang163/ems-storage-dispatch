@@ -88,46 +88,68 @@ export interface DataQuery {
   limit?: number
 }
 
+/**
+ * 设备管理API接口
+ * 后端路径：/api/devices
+ */
 export const deviceApi = {
   list: (params: DeviceQuery) =>
-    request.get<any, PageResult<Device>>('/device/list', { params }),
-  get: (id: number) => request.get<any, Device>(`/device/${id}`),
-  create: (data: Partial<Device>) => request.post<any, Device>('/device', data),
-  update: (data: Device) => request.put<any, Device>('/device', data),
-  delete: (id: number) => request.delete<any, void>(`/device/${id}`),
-  getBySn: (deviceSn: string) => request.get<any, Device>(`/device/sn/${deviceSn}`)
+    request.get<any, PageResult<Device>>('/devices/list', { params }),
+  get: (id: number) => request.get<any, Device>(`/devices/${id}`),
+  create: (data: Partial<Device>) => request.post<any, Device>('/devices', data),
+  update: (data: Device) => request.put<any, Device>(`/devices/${data.id}`, data),
+  delete: (id: number) => request.delete<any, void>(`/devices/${id}`),
+  getBySn: (deviceSn: string) => request.get<any, Device>(`/devices/sn/${deviceSn}`)
 }
 
+/**
+ * 电价配置API接口
+ * 后端路径：/api/prices
+ */
 export const priceApi = {
-  list: () => request.get<any, TimeOfUsePrice[]>('/price/list'),
-  get: (id: number) => request.get<any, TimeOfUsePrice>(`/price/${id}`),
+  list: () => request.get<any, TimeOfUsePrice[]>('/prices'),
+  get: (id: number) => request.get<any, TimeOfUsePrice>(`/prices/${id}`),
   create: (data: Partial<TimeOfUsePrice>) =>
-    request.post<any, TimeOfUsePrice>('/price', data),
-  update: (data: TimeOfUsePrice) => request.put<any, TimeOfUsePrice>('/price', data),
-  delete: (id: number) => request.delete<any, void>(`/price/${id}`),
-  getCurrentPrice: () => request.get<any, TimeOfUsePrice>('/price/current')
+    request.post<any, TimeOfUsePrice>('/prices', data),
+  update: (data: TimeOfUsePrice) => request.put<any, TimeOfUsePrice>(`/prices/${data.id}`, data),
+  delete: (id: number) => request.delete<any, void>(`/prices/${id}`),
+  getCurrentPrice: () => request.get<any, TimeOfUsePrice>('/prices/current')
 }
 
+/**
+ * 数据查询API接口
+ * 后端路径：/api/data
+ */
 export const dataApi = {
   getRealtime: (deviceType: string, deviceSn: string) =>
     request.get<any, RealtimeDataVO>(`/data/realtime/${deviceType}/${deviceSn}`),
   getHistory: (params: DataQuery) =>
-    request.get<any, any[]>('/data/history', { params }),
+    request.post<any, any[]>(`/data/${params.deviceType}/query`, {
+      deviceSn: params.deviceSn,
+      startTime: params.startTime,
+      endTime: params.endTime,
+      field: params.field,
+      limit: params.limit
+    }),
   getLatest: (deviceType: string, deviceSn: string, limit: number = 100) =>
-    request.get<any, any[]>(`/data/latest/${deviceType}/${deviceSn}`, {
+    request.get<any, any[]>(`/data/${deviceType}/${deviceSn}/latest`, {
       params: { limit }
     })
 }
 
+/**
+ * 控制命令API接口
+ * 后端路径：/api/commands
+ */
 export const commandApi = {
   sendCommand: (deviceSn: string, command: string, params: Record<string, any>) =>
-    request.post<any, void>('/command/send', { deviceSn, command, params }),
+    request.post<any, void>('/commands/custom', { deviceSn, commandType: command, params }),
   charge: (deviceSn: string, power: number) =>
-    request.post<any, void>('/command/charge', { deviceSn, power }),
+    request.post<any, void>('/commands/charge', { deviceSn, power }),
   discharge: (deviceSn: string, power: number) =>
-    request.post<any, void>('/command/discharge', { deviceSn, power }),
+    request.post<any, void>('/commands/discharge', { deviceSn, power }),
   stop: (deviceSn: string) =>
-    request.post<any, void>('/command/stop', { deviceSn })
+    request.post<any, void>('/commands/stop', { deviceSn })
 }
 
 export default request

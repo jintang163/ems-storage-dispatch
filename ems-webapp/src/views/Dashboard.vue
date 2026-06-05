@@ -30,7 +30,7 @@
             <div class="stat-content">
               <div class="stat-label">光伏出力</div>
               <div class="stat-value">
-                {{ pvData?.data?.outputPower || '--' }}
+                {{ pvData?.data?.acPower || '--' }}
                 <span class="stat-unit">kW</span>
               </div>
             </div>
@@ -134,10 +134,10 @@
               </template>
               <div class="device-info">
                 <p><strong>设备编号：</strong>{{ dataStore.deviceSns.pv }}</p>
-                <p><strong>输出功率：</strong>{{ pvData?.data?.outputPower || '--' }} kW</p>
+                <p><strong>输出功率：</strong>{{ pvData?.data?.acPower || '--' }} kW</p>
                 <p><strong>日发电量：</strong>{{ pvData?.data?.dailyEnergy || '--' }} kWh</p>
                 <p><strong>总发电量：</strong>{{ pvData?.data?.totalEnergy || '--' }} kWh</p>
-                <p><strong>机内温度：</strong>{{ pvData?.data?.temperature || '--' }} °C</p>
+                <p><strong>机内温度：</strong>{{ pvData?.data?.moduleTemperature || '--' }} °C</p>
               </div>
             </el-card>
           </el-col>
@@ -175,7 +175,7 @@
                 <p><strong>有功功率：</strong>{{ pcsData?.data?.activePower || '--' }} kW</p>
                 <p><strong>无功功率：</strong>{{ pcsData?.data?.reactivePower || '--' }} kvar</p>
                 <p><strong>工作模式：</strong>{{ getWorkModeText(pcsData?.data?.workMode) }}</p>
-                <p><strong>运行状态：</strong>{{ getStatusText(pcsData?.data?.status) }}</p>
+                <p><strong>运行状态：</strong>{{ getStatusText(pcsData?.data?.runningStatus) }}</p>
               </div>
             </el-card>
           </el-col>
@@ -399,8 +399,8 @@ watch(
 watch(
   () => dataStore.pvData,
   (data) => {
-    if (data?.data?.outputPower !== undefined) {
-      addDataPoint(pvDataHistory.value, data.data.outputPower)
+    if (data?.data?.acPower !== undefined) {
+      addDataPoint(pvDataHistory.value, data.data.acPower)
       updatePvChart()
     }
   },

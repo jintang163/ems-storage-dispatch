@@ -678,7 +678,7 @@ cache:
   retry_interval: 60
 
 simulation:
-  enabled: true
+  enabled: false
   mode: random
 
 mqtt:
