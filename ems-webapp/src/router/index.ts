@@ -46,6 +46,24 @@ const routes: RouteRecordRaw[] = [
     name: 'TransformerDemand',
     component: () => import('@/views/TransformerDemand.vue'),
     meta: { title: '变压器需量管理' }
+  },
+  {
+    path: '/strategy-config',
+    name: 'StrategyConfig',
+    component: () => import('@/views/StrategyConfig.vue'),
+    meta: { title: '策略配置' }
+  },
+  {
+    path: '/dispatch-plan',
+    name: 'DispatchPlan',
+    component: () => import('@/views/DispatchPlan.vue'),
+    meta: { title: '调度计划' }
+  },
+  {
+    path: '/realtime-control',
+    name: 'RealtimeControl',
+    component: () => import('@/views/RealtimeControl.vue'),
+    meta: { title: '实时控制' }
   }
 ]
 

@@ -380,6 +380,336 @@ export const batteryDegradationApi = {
 }
 
 /**
+ * 策略配置类型定义
+ * 用于定义日内与实时策略的配置参数
+ */
+export interface StrategyConfig {
+  id: number
+  strategyName: string
+  strategyType: string
+  strategyCode: string
+  arbitrageWeight: number
+  lifespanWeight: number
+  demandWeight: number
+  maxChargeRate: number
+  maxDischargeRate: number
+  minSoc: number
+  maxSoc: number
+  maxDailyCycles: number
+  maxDepthOfDischarge: number
+  demandThresholdRatio: number
+  priceForecastEnabled: boolean
+  peakValleyArbitrageEnabled: boolean
+  peakShavingEnabled: boolean
+  valleyFillingEnabled: boolean
+  demandControlEnabled: boolean
+  batterySn?: string
+  transformerCode?: string
+  scheduleIntervalMinutes: number
+  rollingOptimizationEnabled: boolean
+  rollingIntervalMinutes?: number
+  lookAheadHours?: number
+  priority: number
+  enabled: boolean
+  defaultStrategy: boolean
+  description?: string
+  createdAt?: string
+  updatedAt?: string
+}
+
+/**
+ * 调度计划时段类型定义
+ */
+export interface DispatchPlanHour {
+  id?: number
+  planId?: number
+  hourIndex: number
+  startTime: string
+  endTime: string
+  periodType?: string
+  price?: number
+  power: number
+  energy?: number
+  expectedSoc?: number
+  chargeRate?: number
+  depthOfDischarge?: number
+  actionType?: string
+  forecastLoad?: number
+  forecastPv?: number
+  expectedDemand?: number
+  demandControlRequired?: boolean
+  revenue?: number
+  degradationCost?: number
+  demandSaving?: number
+  objectiveScore?: number
+  remark?: string
+}
+
+/**
+ * 调度计划类型定义
+ */
+export interface DispatchPlan {
+  id: number
+  strategyId: number
+  strategyCode: string
+  planDate: string
+  planType: string
+  batterySn?: string
+  transformerCode?: string
+  initialSoc?: number
+  expectedRevenue?: number
+  expectedDegradation?: number
+  expectedDemandSaving?: number
+  totalObjectiveScore?: number
+  arbitrageScore?: number
+  lifespanScore?: number
+  demandScore?: number
+  generatedAt?: string
+  executedAt?: string
+  status: string
+  createdBy?: string
+  remark?: string
+  planHours?: DispatchPlanHour[]
+  createdAt?: string
+  updatedAt?: string
+}
+
+/**
+ * 策略执行结果类型定义
+ */
+export interface StrategyResultVO {
+  strategyCode: string
+  strategyName: string
+  actionType: string
+  targetPower?: number
+  expectedSoc?: number
+  expectedRevenue?: number
+  expectedDegradationCost?: number
+  expectedDemandSaving?: number
+  totalObjectiveScore?: number
+  arbitrageScore?: number
+  lifespanScore?: number
+  demandScore?: number
+  urgencyLevel?: string
+  recommendedActions?: string[]
+  additionalInfo?: Record<string, any>
+  status: string
+  message?: string
+  currentPrice?: number
+}
+
+/**
+ * 实时控制请求类型定义
+ */
+export interface RealTimeControlRequest {
+  strategyCode: string
+  batterySn?: string
+  transformerCode?: string
+  currentSoc?: number
+  currentLoad?: number
+  currentPv?: number
+  currentDemand?: number
+  currentPrice?: number
+  batteryTemperature?: number
+  batteryHealth?: number
+  executionType?: string
+}
+
+/**
+ * 电价预测类型定义
+ */
+export interface PriceForecast {
+  id?: number
+  forecastDate: string
+  hourIndex: number
+  startTime: string
+  endTime: string
+  forecastPrice: number
+  actualPrice?: number
+  priceDeviation?: number
+  deviationPercentage?: number
+  periodType?: string
+  forecastSource?: string
+  forecastModel?: string
+  confidenceLevel?: number
+  isPeak: boolean
+  isValley: boolean
+  remark?: string
+}
+
+/**
+ * 负荷预测类型定义
+ */
+export interface LoadForecast {
+  id?: number
+  forecastDate: string
+  hourIndex: number
+  startTime: string
+  endTime: string
+  forecastLoad: number
+  forecastPv?: number
+  forecastGrid?: number
+  actualLoad?: number
+  actualPv?: number
+  loadDeviation?: number
+  deviationPercentage?: number
+  forecastType?: string
+  forecastSource?: string
+  forecastModel?: string
+  confidenceLevel?: number
+  isPeakHour: boolean
+  transformerCode?: string
+  remark?: string
+}
+
+/**
+ * 策略配置API
+ * 后端路径：/api/strategy/config
+ */
+export const strategyConfigApi = {
+  list: () => request.get<any, StrategyConfig[]>('/strategy/config/list'),
+  listEnabled: () => request.get<any, StrategyConfig[]>('/strategy/config/enabled'),
+  get: (id: number) => request.get<any, StrategyConfig>(`/strategy/config/${id}`),
+  getByCode: (strategyCode: string) => request.get<any, StrategyConfig>(`/strategy/config/code/${strategyCode}`),
+  listByType: (strategyType: string) => request.get<any, StrategyConfig[]>(`/strategy/config/type/${strategyType}`),
+  getDefault: () => request.get<any, StrategyConfig>('/strategy/config/default'),
+  listByBatterySn: (batterySn: string) => request.get<any, StrategyConfig[]>(`/strategy/config/battery/${batterySn}`),
+  listByTransformerCode: (transformerCode: string) => request.get<any, StrategyConfig[]>(`/strategy/config/transformer/${transformerCode}`),
+  create: (data: Partial<StrategyConfig>) => request.post<any, StrategyConfig>('/strategy/config', data),
+  update: (id: number, data: StrategyConfig) => request.put<any, StrategyConfig>(`/strategy/config/${id}`, data),
+  delete: (id: number) => request.delete<any, void>(`/strategy/config/${id}`),
+  updateEnabled: (id: number, enabled: boolean) =>
+    request.patch<any, void>(`/strategy/config/${id}/enabled`, { enabled }),
+  setDefault: (id: number) => request.patch<any, void>(`/strategy/config/${id}/default`),
+  validate: (data: Partial<StrategyConfig>) =>
+    request.post<any, Record<string, string>>('/strategy/config/validate', data),
+  normalizeWeights: (data: Partial<StrategyConfig>) =>
+    request.post<any, number>('/strategy/config/normalize-weights', data),
+  getTypeStatistics: () => request.get<any, Record<string, number>>('/strategy/config/statistics/type'),
+  getEnabledCount: () => request.get<any, number>('/strategy/config/statistics/enabled-count'),
+}
+
+/**
+ * 调度计划API
+ * 后端路径：/api/strategy/plan
+ */
+export const dispatchPlanApi = {
+  generate: (data: {
+    strategyId?: number
+    strategyCode: string
+    planDate: string
+    planType?: string
+    initialSoc?: number
+    batterySn?: string
+    transformerCode?: string
+    usePriceForecast?: boolean
+    useLoadForecast?: boolean
+    createdBy?: string
+    remark?: string
+  }) => request.post<any, DispatchPlan>('/strategy/plan/generate', data),
+  regenerate: (id: number) => request.post<any, DispatchPlan>(`/strategy/plan/regenerate/${id}`),
+  get: (id: number) => request.get<any, DispatchPlan>(`/strategy/plan/${id}`),
+  getLatestPending: (strategyCode: string, date?: string) =>
+    request.get<any, DispatchPlan>(`/strategy/plan/latest/${strategyCode}`, { params: { date } }),
+  listByStrategyId: (strategyId: number) =>
+    request.get<any, DispatchPlan[]>(`/strategy/plan/strategy/${strategyId}`),
+  listByDate: (date: string) => request.get<any, DispatchPlan[]>(`/strategy/plan/date/${date}`),
+  listByDateRange: (startDate: string, endDate: string) =>
+    request.get<any, DispatchPlan[]>('/strategy/plan/date-range', { params: { startDate, endDate } }),
+  listByStatus: (status: string) => request.get<any, DispatchPlan[]>(`/strategy/plan/status/${status}`),
+  listPending: () => request.get<any, DispatchPlan[]>('/strategy/plan/pending'),
+  execute: (id: number) => request.post<any, void>(`/strategy/plan/execute/${id}`),
+  cancel: (id: number) => request.post<any, void>(`/strategy/plan/cancel/${id}`),
+  approve: (id: number, approvedBy: string) =>
+    request.post<any, void>(`/strategy/plan/approve/${id}`, { approvedBy }),
+  executeCurrentHour: (strategyCode: string, batterySn?: string) =>
+    request.post<any, StrategyResultVO>(`/strategy/plan/execute-current/${strategyCode}`, null, { params: { batterySn } }),
+  generateRolling: (strategyCode: string, date: string, startHour: number) =>
+    request.post<any, DispatchPlan>(`/strategy/plan/rolling/${strategyCode}`, null, { params: { date, startHour } }),
+  getBenefits: (id: number) => request.get<any, Record<string, number>>(`/strategy/plan/benefits/${id}`),
+  getStatisticsByDate: (date: string, strategyCode: string) =>
+    request.get<any, any>(`/strategy/plan/statistics/date/${date}`, { params: { strategyCode } }),
+  getStatisticsByDateRange: (startDate: string, endDate: string, strategyCode: string) =>
+    request.get<any, any[]>('/strategy/plan/statistics/date-range', { params: { startDate, endDate, strategyCode } }),
+  getStatusSummary: () => request.get<any, Record<string, any>>('/strategy/plan/status-summary'),
+  getTotalBenefits: (startDate: string, endDate: string) =>
+    request.get<any, Record<string, number>>('/strategy/plan/total-benefits', { params: { startDate, endDate } }),
+}
+
+/**
+ * 实时策略API
+ * 后端路径：/api/strategy/realtime
+ */
+export const realTimeStrategyApi = {
+  executeControl: (data: RealTimeControlRequest) =>
+    request.post<any, StrategyResultVO>('/strategy/realtime/control', data),
+  executeDemandControl: (data: RealTimeControlRequest) =>
+    request.post<any, StrategyResultVO>('/strategy/realtime/demand-control', data),
+  executeArbitrage: (data: RealTimeControlRequest) =>
+    request.post<any, StrategyResultVO>('/strategy/realtime/arbitrage', data),
+  executePeakShaving: (data: RealTimeControlRequest) =>
+    request.post<any, StrategyResultVO>('/strategy/realtime/peak-shaving', data),
+  executeValleyFilling: (data: RealTimeControlRequest) =>
+    request.post<any, StrategyResultVO>('/strategy/realtime/valley-filling', data),
+  executeMultiObjective: (data: RealTimeControlRequest) =>
+    request.post<any, StrategyResultVO>('/strategy/realtime/multi-objective', data),
+  checkDemandWarning: (strategyCode: string, currentDemand: number, predictedDemand?: number) =>
+    request.get<any, string>('/strategy/realtime/demand-warning/${strategyCode}', { params: { currentDemand, predictedDemand } }),
+  calculateDischargePower: (strategyCode: string, currentDemand: number, predictedDemand?: number) =>
+    request.get<any, number>('/strategy/realtime/discharge-power/${strategyCode}', { params: { currentDemand, predictedDemand } }),
+  calculateChargePower: (strategyCode: string, currentDemand: number, currentSoc: number) =>
+    request.get<any, number>('/strategy/realtime/charge-power/${strategyCode}', { params: { currentDemand, currentSoc } }),
+  listLogs: (strategyCode: string, startTime: string, endTime: string) =>
+    request.get<any, any[]>('/strategy/realtime/logs/${strategyCode}', { params: { startTime, endTime } }),
+  listRecentLogs: (strategyCode: string, hours?: number) =>
+    request.get<any, any[]>('/strategy/realtime/logs/recent/${strategyCode}', { params: { hours } }),
+  getStatistics: (strategyCode: string, startDate: string, endDate: string) =>
+    request.get<any, any>('/strategy/realtime/statistics/${strategyCode}', { params: { startDate, endDate } }),
+  getStatus: (strategyCode: string, batterySn?: string, transformerCode?: string) =>
+    request.get<any, Record<string, any>>('/strategy/realtime/status/${strategyCode}', { params: { batterySn, transformerCode } }),
+  getTotalBenefits: (strategyCode: string, startDate: string, endDate: string) =>
+    request.get<any, Record<string, number>>('/strategy/realtime/benefits/${strategyCode}', { params: { startDate, endDate } }),
+  getActionStatistics: (strategyCode: string, startDate: string, endDate: string) =>
+    request.get<any, Record<string, any>>('/strategy/realtime/action-statistics/${strategyCode}', { params: { startDate, endDate } }),
+}
+
+/**
+ * 预测数据API
+ * 后端路径：/api/strategy/forecast
+ */
+export const forecastApi = {
+  generatePriceForecast: (date: string, source?: string) =>
+    request.post<any, PriceForecast[]>('/strategy/forecast/price/generate', null, { params: { date, source } }),
+  generatePriceForecastByTou: (date: string) =>
+    request.post<any, PriceForecast[]>('/strategy/forecast/price/generate-tou', null, { params: { date } }),
+  generateLoadForecast: (date: string, transformerCode: string) =>
+    request.post<any, LoadForecast[]>('/strategy/forecast/load/generate', null, { params: { date, transformerCode } }),
+  getPriceForecast: (date: string) => request.get<any, PriceForecast[]>(`/strategy/forecast/price/${date}`),
+  getLoadForecast: (date: string, transformerCode: string) =>
+    request.get<any, LoadForecast[]>(`/strategy/forecast/load/${date}`, { params: { transformerCode } }),
+  getPriceAtHour: (date: string, hour: number) =>
+    request.get<any, PriceForecast>(`/strategy/forecast/price/${date}/hour/${hour}`),
+  getLoadAtHour: (date: string, hour: number, transformerCode: string) =>
+    request.get<any, LoadForecast>(`/strategy/forecast/load/${date}/hour/${hour}`, { params: { transformerCode } }),
+  getPeakHours: (date: string) => request.get<any, PriceForecast[]>(`/strategy/forecast/price/${date}/peak-hours`),
+  getValleyHours: (date: string) => request.get<any, PriceForecast[]>(`/strategy/forecast/price/${date}/valley-hours`),
+  getMaxPrice: (date: string) => request.get<any, number>(`/strategy/forecast/price/${date}/max`),
+  getMinPrice: (date: string) => request.get<any, number>(`/strategy/forecast/price/${date}/min`),
+  getAvgPrice: (date: string) => request.get<any, number>(`/strategy/forecast/price/${date}/avg`),
+  getMaxLoad: (date: string, transformerCode: string) =>
+    request.get<any, number>(`/strategy/forecast/load/${date}/max`, { params: { transformerCode } }),
+  getMinLoad: (date: string, transformerCode: string) =>
+    request.get<any, number>(`/strategy/forecast/load/${date}/min`, { params: { transformerCode } }),
+  getAvgLoad: (date: string, transformerCode: string) =>
+    request.get<any, number>(`/strategy/forecast/load/${date}/avg`, { params: { transformerCode } }),
+  calculatePriceSpread: (date: string) => request.get<any, number>(`/strategy/forecast/price/${date}/spread`),
+  identifyArbitrageOpportunities: (date: string) =>
+    request.get<any, any[]>(`/strategy/forecast/arbitrage-opportunities/${date}`),
+  identifyPeakShavingOpportunities: (date: string, transformerCode: string) =>
+    request.get<any, any[]>(`/strategy/forecast/peak-shaving-opportunities/${date}`, { params: { transformerCode } }),
+}
+
+/**
  * 变压器需量管理API
  * 后端路径：/api/transformer/demand
  */
