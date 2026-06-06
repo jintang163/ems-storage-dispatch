@@ -50,6 +50,7 @@ public class DispatchPlanServiceImpl implements DispatchPlanService {
     private final ForecastService forecastService;
     private final RealTimeStrategyService realTimeStrategyService;
     private final com.ems.service.PythonOptimizerService pythonOptimizerService;
+    private final DataQueryService dataQueryService;
 
     private static final BigDecimal DEFAULT_BATTERY_CAPACITY = new BigDecimal("1000");
 
@@ -289,12 +290,53 @@ public class DispatchPlanServiceImpl implements DispatchPlanService {
             throw new EmsException("当前时段没有调度计划");
         }
 
+        BigDecimal currentSoc = new BigDecimal("50");
+        BigDecimal currentLoad = currentHourPlan.getForecastLoad();
+
+        try {
+            if (batterySn != null && !batterySn.isEmpty()) {
+                com.ems.domain.tsdb.BmsData bmsData = dataQueryService.getLatestBmsData(batterySn);
+                if (bmsData != null && bmsData.getSoc() != null) {
+                    currentSoc = BigDecimal.valueOf(bmsData.getSoc());
+                }
+            }
+
+            StrategyConfigDTO config = strategyConfigService.getByStrategyCode(strategyCode);
+            if (config != null && config.getTransformerCode() != null) {
+                com.ems.domain.tsdb.MeterData meterData = dataQueryService.getLatestMeterData(
+                        config.getTransformerCode());
+                if (meterData != null && meterData.getActivePower() != null) {
+                    currentLoad = BigDecimal.valueOf(meterData.getActivePower());
+                }
+            }
+        } catch (Exception e) {
+            log.warn("获取实时数据失败，使用计划数据: {}", e.getMessage());
+        }
+
+        BigDecimal expectedSoc = currentHourPlan.getExpectedSoc() != null ?
+                currentHourPlan.getExpectedSoc() : currentSoc;
+        BigDecimal forecastLoad = currentHourPlan.getForecastLoad();
+        BigDecimal plannedPower = currentHourPlan.getPower();
+
+        if (pythonOptimizerService.isHealthy()) {
+            try {
+                log.info("调用Python实时调整 - 当前SOC: {}%, 预期SOC: {}%, 当前负荷: {}kW",
+                        currentSoc, expectedSoc, currentLoad);
+                return executeRealTimeAdjustWithPython(
+                        strategyCode, batterySn, currentSoc, expectedSoc,
+                        currentLoad, forecastLoad, plannedPower);
+            } catch (Exception e) {
+                log.warn("Python实时调整失败，降级使用Java本地控制: {}", e.getMessage());
+            }
+        }
+
         RealTimeControlRequest request = new RealTimeControlRequest();
         request.setStrategyCode(strategyCode);
         request.setBatterySn(batterySn);
         request.setExecutionType("MULTI_OBJECTIVE");
+        request.setCurrentSoc(currentSoc);
         request.setCurrentPrice(currentHourPlan.getPrice());
-        request.setCurrentLoad(currentHourPlan.getForecastLoad());
+        request.setCurrentLoad(currentLoad);
         request.setCurrentPv(currentHourPlan.getForecastPv());
         request.setCurrentDemand(currentHourPlan.getExpectedDemand());
 

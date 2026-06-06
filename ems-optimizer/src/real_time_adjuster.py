@@ -32,6 +32,14 @@ class RealTimeAdjustService:
         2. 计算负荷突变：ΔLoad = (实际负荷 - 预测负荷) / 预测负荷 × 100%
         3. 根据偏差类型和程度，动态调整充放电功率
 
+        功率符号约定（输入和内部计算）：
+        - planned_power > 0: 充电
+        - planned_power < 0: 放电
+
+        功率符号约定（输出）：
+        - adjusted_power > 0: 放电（符合用户需求）
+        - adjusted_power < 0: 充电（符合用户需求）
+
         Args:
             request: 实时调整请求
 
@@ -79,13 +87,16 @@ class RealTimeAdjustService:
                 request.current_soc, adjusted_power
             )
 
+            output_adjusted_power = round(-adjusted_power, 2)
+            output_original_power = round(-request.planned_power, 2)
+
             result = RealTimeAdjustResult(
                 success=True,
                 message=adjustment_reason,
-                adjusted_power=round(adjusted_power, 2),
+                adjusted_power=output_adjusted_power,
                 adjustment_reason=adjustment_reason,
                 adjustment_type=adjustment_type,
-                original_power=request.planned_power,
+                original_power=output_original_power,
                 expected_soc=round(expected_soc, 2),
                 urgency_level=urgency_level
             )
@@ -95,8 +106,10 @@ class RealTimeAdjustService:
             if adjustment_type != "NONE":
                 logger.info(
                     f"实时调整完成 - 类型: {adjustment_type}, "
-                    f"原功率: {request.planned_power:.2f}kW, "
-                    f"调整后: {adjusted_power:.2f}kW, "
+                    f"原功率(内): {request.planned_power:.2f}kW, "
+                    f"调整后(内): {adjusted_power:.2f}kW, "
+                    f"原功率(出): {output_original_power:.2f}kW, "
+                    f"调整后(出): {output_adjusted_power:.2f}kW, "
                     f"原因: {adjustment_reason}"
                 )
             else:
@@ -106,13 +119,14 @@ class RealTimeAdjustService:
 
         except Exception as e:
             logger.error(f"实时调整失败: {e}", exc_info=True)
+            output_power = round(-request.planned_power, 2)
             return RealTimeAdjustResult(
                 success=False,
                 message=f"调整失败: {str(e)}",
-                adjusted_power=request.planned_power,
+                adjusted_power=output_power,
                 adjustment_reason=f"调整失败: {str(e)}",
                 adjustment_type="NONE",
-                original_power=request.planned_power
+                original_power=output_power
             )
 
     def _calculate_load_deviation_percent(self, request: RealTimeAdjustRequest) -> float:
