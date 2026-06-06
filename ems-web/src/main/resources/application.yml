@@ -86,3 +86,15 @@ management:
   endpoint:
     health:
       show-details: always
+
+ems:
+  optimizer:
+    python:
+      enabled: true
+      base-url: http://localhost:8001
+      connect-timeout: 5000
+      read-timeout: 30000
+      rolling-optimize-endpoint: /api/optimizer/rolling-optimize
+      real-time-adjust-endpoint: /api/optimizer/real-time-adjust
+      health-endpoint: /api/optimizer/health
+      rolling-optimize15-min-endpoint: /api/optimizer/rolling-optimize/15min

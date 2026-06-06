@@ -126,6 +126,22 @@ services:
     networks:
       - ems-network
 
+  ems-optimizer:
+    build:
+      context: ./ems-optimizer
+      dockerfile: Dockerfile.optimizer
+    container_name: ems-optimizer
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
+      BACKEND_API_URL: http://ems-backend:8080/api
+    ports:
+      - "8001:8001"
+    depends_on:
+      - ems-backend
+    networks:
+      - ems-network
+
 volumes:
   postgres-data:
   influxdb-data:

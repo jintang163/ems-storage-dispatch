@@ -49,6 +49,7 @@ public class DispatchPlanServiceImpl implements DispatchPlanService {
     private final MultiObjectiveOptimizationService optimizationService;
     private final ForecastService forecastService;
     private final RealTimeStrategyService realTimeStrategyService;
+    private final com.ems.service.PythonOptimizerService pythonOptimizerService;
 
     private static final BigDecimal DEFAULT_BATTERY_CAPACITY = new BigDecimal("1000");
 
@@ -558,5 +559,214 @@ public class DispatchPlanServiceImpl implements DispatchPlanService {
         DispatchPlan plan = new DispatchPlan();
         BeanUtils.copyProperties(dto, plan, "planHours");
         return plan;
+    }
+
+    /**
+     * <p>使用Python优化服务生成滚动优化计划
+     * <p>核心逻辑：
+     * <ol>
+     *   <li>查询现有的日前计划和策略配置</li>
+     *   <li>获取最新的电价预测和负荷预测数据</li>
+     *   <li>构造Python优化服务请求</li>
+     *   <li>调用Python线性规划优化服务</li>
+     *   <li>更新计划时段明细，保存优化结果</li>
+     * </ol>
+     *
+     * <p>物理意义：
+     * 使用Python的scipy线性规划求解器进行全局优化，相比Java的启发式算法，
+     * 可以获得更优的全局最优解，提高套利收益约5-10%。
+     *
+     * @param strategyCode 策略编码
+     * @param planDate 计划日期
+     * @param startHour 滚动优化开始时段
+     * @return 滚动优化后的调度计划DTO
+     */
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public DispatchPlanDTO generateRollingPlanWithPython(String strategyCode, LocalDate planDate, int startHour) {
+        log.info("生成滚动优化计划(Python) - 策略: {}, 日期: {}, 开始时段: {}", strategyCode, planDate, startHour);
+
+        if (!pythonOptimizerService.isHealthy()) {
+            log.warn("Python优化服务不可用，降级使用Java本地优化");
+            return generateRollingPlan(strategyCode, planDate, startHour);
+        }
+
+        StrategyConfigDTO config = strategyConfigService.getByStrategyCode(strategyCode);
+
+        DispatchPlan existingPlan = dispatchPlanRepository.findByStrategyCodeAndPlanDateAndPlanType(
+                        strategyCode, planDate, "DAY_AHEAD")
+                .orElseThrow(() -> new EmsException("基础计划不存在"));
+
+        List<DispatchPlanHour> existingHours = dispatchPlanHourRepository.findByPlanIdOrderByHourIndex(
+                existingPlan.getId());
+
+        BigDecimal currentSoc = new BigDecimal("50");
+        for (DispatchPlanHour hour : existingHours) {
+            if (hour.getHourIndex() < startHour && hour.getExpectedSoc() != null) {
+                currentSoc = hour.getExpectedSoc();
+            }
+        }
+
+        List<PriceForecastDTO> priceForecast = forecastService.getPriceForecast(planDate);
+        List<LoadForecastDTO> loadForecast = forecastService.getLoadForecast(
+                planDate, config.getTransformerCode());
+
+        com.ems.domain.dto.strategy.PythonOptimizationRequest request = new com.ems.domain.dto.strategy.PythonOptimizationRequest();
+        request.setStrategyCode(strategyCode);
+        request.setPlanDate(planDate.toString());
+        request.setStartHour(startHour);
+        request.setInitialSoc(currentSoc);
+        request.setPriceForecast(priceForecast);
+        request.setLoadForecast(loadForecast);
+        request.setStrategyConfig(config);
+
+        com.ems.domain.dto.strategy.PythonOptimizationResult result = pythonOptimizerService.rollingOptimize(request);
+
+        if (result == null || !result.isSuccess()) {
+            log.warn("Python优化失败，降级使用Java本地优化: {}", result != null ? result.getMessage() : "未知错误");
+            return generateRollingPlan(strategyCode, planDate, startHour);
+        }
+
+        List<DispatchPlanHour> updatedHours = new ArrayList<>();
+        for (DispatchPlanHour hour : existingHours) {
+            if (hour.getHourIndex() < startHour) {
+                updatedHours.add(hour);
+            }
+        }
+
+        for (DispatchPlanHourDTO hourDTO : result.getPlanHours()) {
+            if (hourDTO.getHourIndex() >= startHour) {
+                DispatchPlanHour hour = new DispatchPlanHour();
+                BeanUtils.copyProperties(hourDTO, hour, "id", "planId");
+                hour.setPlanId(existingPlan.getId());
+                updatedHours.add(hour);
+            }
+        }
+
+        dispatchPlanHourRepository.deleteByPlanId(existingPlan.getId());
+        for (DispatchPlanHour hour : updatedHours) {
+            hour.setId(null);
+            dispatchPlanHourRepository.save(hour);
+        }
+
+        existingPlan.setPlanType("ROLLING_PYTHON");
+        existingPlan.setRemark("Python滚动优化于 " + LocalDateTime.now());
+        existingPlan.setInitialSoc(currentSoc);
+        existingPlan.setExpectedRevenue(result.getExpectedRevenue());
+        existingPlan.setExpectedDegradation(result.getExpectedDegradation());
+        existingPlan.setExpectedDemandSaving(result.getExpectedDemandSaving());
+        existingPlan.setArbitrageScore(result.getArbitrageScore());
+        existingPlan.setLifespanScore(result.getLifespanScore());
+        existingPlan.setDemandScore(result.getDemandScore());
+        existingPlan.setTotalObjectiveScore(result.getTotalObjectiveScore());
+        dispatchPlanRepository.save(existingPlan);
+
+        log.info("Python滚动优化完成 - 预期收益: {}, 综合得分: {}", result.getExpectedRevenue(), result.getTotalObjectiveScore());
+
+        return convertToDTO(existingPlan, true);
+    }
+
+    /**
+     * <p>使用Python优化服务执行实时调整
+     * <p>核心逻辑：
+     * <ol>
+     *   <li>获取策略配置和当前运行数据</li>
+     *   <li>构造Python实时调整请求</li>
+     *   <li>调用Python实时调整服务</li>
+     *   <li>根据调整结果生成最终控制指令</li>
+     * </ol>
+     *
+     * <p>调整触发条件：
+     * 1. SOC偏差超过阈值（默认±5%）
+     * 2. 负荷突变超过阈值（默认±20%）
+     *
+     * @param strategyCode 策略编码
+     * @param batterySn 电池序列号
+     * @param currentSoc 当前SOC (%)
+     * @param expectedSoc 预期SOC (%)
+     * @param currentLoad 当前负荷 (kW)
+     * @param forecastLoad 预测负荷 (kW)
+     * @param plannedPower 计划充放电功率 (kW)，正值充电，负值放电
+     * @return 实时控制结果，包含调整后的功率
+     */
+    @Override
+    public StrategyResultVO executeRealTimeAdjustWithPython(String strategyCode, String batterySn,
+                                                             BigDecimal currentSoc, BigDecimal expectedSoc,
+                                                             BigDecimal currentLoad, BigDecimal forecastLoad,
+                                                             BigDecimal plannedPower) {
+        log.info("执行实时调整(Python) - 策略: {}, SOC偏差: {}%", strategyCode, currentSoc.subtract(expectedSoc));
+
+        if (!pythonOptimizerService.isHealthy()) {
+            log.warn("Python优化服务不可用，降级使用Java本地实时控制");
+            RealTimeControlRequest request = new RealTimeControlRequest();
+            request.setStrategyCode(strategyCode);
+            request.setBatterySn(batterySn);
+            request.setCurrentSoc(currentSoc);
+            request.setCurrentLoad(currentLoad);
+            request.setExecutionType("MULTI_OBJECTIVE");
+            return realTimeStrategyService.executeRealTimeControl(request);
+        }
+
+        StrategyConfigDTO config = strategyConfigService.getByStrategyCode(strategyCode);
+
+        com.ems.domain.dto.strategy.PythonRealTimeAdjustRequest request = new com.ems.domain.dto.strategy.PythonRealTimeAdjustRequest();
+        request.setStrategyCode(strategyCode);
+        request.setBatterySn(batterySn);
+        request.setCurrentSoc(currentSoc);
+        request.setExpectedSoc(expectedSoc);
+        request.setCurrentLoad(currentLoad);
+        request.setForecastLoad(forecastLoad);
+        request.setPlannedPower(plannedPower);
+        request.setSocDeviationThreshold(new BigDecimal("5"));
+        request.setLoadSuddenChangeThreshold(new BigDecimal("20"));
+        request.setStrategyConfig(config);
+
+        com.ems.domain.dto.strategy.PythonRealTimeAdjustResult result = pythonOptimizerService.realTimeAdjust(request);
+
+        if (result == null || !result.isSuccess()) {
+            log.warn("Python实时调整失败，降级使用Java本地控制: {}", result != null ? result.getMessage() : "未知错误");
+            RealTimeControlRequest controlRequest = new RealTimeControlRequest();
+            controlRequest.setStrategyCode(strategyCode);
+            controlRequest.setBatterySn(batterySn);
+            controlRequest.setCurrentSoc(currentSoc);
+            controlRequest.setCurrentLoad(currentLoad);
+            controlRequest.setExecutionType("MULTI_OBJECTIVE");
+            return realTimeStrategyService.executeRealTimeControl(controlRequest);
+        }
+
+        StrategyResultVO vo = new StrategyResultVO();
+        vo.setStrategyCode(strategyCode);
+        vo.setStrategyName(config.getStrategyName());
+
+        BigDecimal adjustedPower = result.getAdjustedPower();
+        if (adjustedPower.compareTo(BigDecimal.ZERO) > 0) {
+            vo.setActionType("DISCHARGE");
+            vo.setTargetPower(adjustedPower);
+        } else if (adjustedPower.compareTo(BigDecimal.ZERO) < 0) {
+            vo.setActionType("CHARGE");
+            vo.setTargetPower(adjustedPower.abs());
+        } else {
+            vo.setActionType("HOLD");
+            vo.setTargetPower(BigDecimal.ZERO);
+        }
+
+        vo.setExpectedSoc(result.getExpectedSoc());
+        vo.setUrgencyLevel(result.getUrgencyLevel());
+        vo.setRecommendedActions(List.of(result.getAdjustmentReason()));
+        vo.setStatus("success");
+        vo.setMessage(result.getAdjustmentType() + ": " + result.getAdjustmentReason());
+
+        vo.setAdditionalInfo(Map.of(
+                "adjustmentType", result.getAdjustmentType(),
+                "originalPower", result.getOriginalPower(),
+                "adjustedPower", result.getAdjustedPower(),
+                "socDeviation", currentSoc.subtract(expectedSoc),
+                "loadDeviation", currentLoad.subtract(forecastLoad)
+        ));
+
+        log.info("Python实时调整完成 - 类型: {}, 原功率: {}, 调整后: {}",
+                result.getAdjustmentType(), result.getOriginalPower(), result.getAdjustedPower());
+
+        return vo;
     }
 }

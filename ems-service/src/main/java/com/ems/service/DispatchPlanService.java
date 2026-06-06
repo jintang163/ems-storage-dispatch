@@ -70,4 +70,11 @@ public interface DispatchPlanService {
     List<DispatchPlanDTO> listPendingPlans();
 
     DispatchPlanDTO generateRollingPlan(String strategyCode, LocalDate planDate, int startHour);
+
+    DispatchPlanDTO generateRollingPlanWithPython(String strategyCode, LocalDate planDate, int startHour);
+
+    StrategyResultVO executeRealTimeAdjustWithPython(String strategyCode, String batterySn,
+                                                      BigDecimal currentSoc, BigDecimal expectedSoc,
+                                                      BigDecimal currentLoad, BigDecimal forecastLoad,
+                                                      BigDecimal plannedPower);
 }
