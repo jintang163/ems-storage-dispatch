@@ -101,6 +101,14 @@ public class TimeOfUsePriceServiceImpl implements TimeOfUsePriceService {
     }
 
     @Override
+    public List<TimeOfUsePriceDTO> listValidPrices(LocalDate date) {
+        List<TimeOfUsePrice> prices = priceRepository.findValidPrices(date);
+        return prices.stream()
+                .map(this::convertToDTO)
+                .collect(Collectors.toList());
+    }
+
+    @Override
     public BigDecimal getCurrentPrice() {
         return getPriceAtTime(LocalDateTime.now());
     }

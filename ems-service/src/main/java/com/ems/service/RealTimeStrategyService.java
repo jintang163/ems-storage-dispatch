@@ -57,7 +57,8 @@ public interface RealTimeStrategyService {
 
     BigDecimal calculateRequiredDischargePower(String strategyCode, BigDecimal currentDemand, BigDecimal predictedDemand);
 
-    BigDecimal calculateRequiredChargePower(String strategyCode, BigDecimal currentDemand, BigDecimal currentSoc);
+    BigDecimal calculateRequiredChargePower(String strategyCode, String transformerCode,
+                                            BigDecimal currentDemand, BigDecimal currentSoc);
 
     List<StrategyExecutionLogDTO> listExecutionLogs(String strategyCode, LocalDateTime startTime, LocalDateTime endTime);
 

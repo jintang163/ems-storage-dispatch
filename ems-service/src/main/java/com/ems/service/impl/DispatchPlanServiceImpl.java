@@ -52,6 +52,26 @@ public class DispatchPlanServiceImpl implements DispatchPlanService {
 
     private static final BigDecimal DEFAULT_BATTERY_CAPACITY = new BigDecimal("1000");
 
+    /**
+     * <p>生成日前调度计划 - 每日凌晨生成次日24小时充放电计划
+     * <p>核心逻辑：
+     * <ol>
+     *   <li>校验该策略该日期是否已存在日前计划，存在则抛出异常避免重复生成</li>
+     *   <li>调用MultiObjectiveOptimizationService.optimizeDayAheadPlan()执行多目标优化算法</li>
+     *   <li>优化算法内部会从ForecastService获取真实的电价预测和负荷预测数据</li>
+     *   <li>保存计划主表（DispatchPlan），记录生成时间等元数据</li>
+     *   <li>批量保存24小时时段明细表（DispatchPlanHour）</li>
+     *   <li>返回完整的计划DTO，包含主表信息和24小时明细</li>
+     * </ol>
+     *
+     * <p>物理意义：
+     * 日前计划是储能系统次日运行的基础，基于次日的电价和负荷预测，
+     * 通过多目标优化算法确定每个小时的充放电功率，在满足约束条件的前提下
+     * 最大化套利收益、最小化电池衰减、避免需量超标。
+     *
+     * @param request 计划生成请求，包含策略编码、计划日期、初始SOC等参数
+     * @return 生成的调度计划DTO，包含24小时充放电计划明细
+     */
     @Override
     @Transactional(rollbackFor = Exception.class)
     public DispatchPlanDTO generatePlan(StrategyGenerateRequest request) {
@@ -86,6 +106,26 @@ public class DispatchPlanServiceImpl implements DispatchPlanService {
         return planDTO;
     }
 
+    /**
+     * <p>重新生成调度计划 - 当预测数据更新或策略参数调整时，重新生成计划
+     * <p>核心逻辑：
+     * <ol>
+     *   <li>查询现有计划，验证其存在性</li>
+     *   <li>删除现有计划的24小时时段明细（保留主表作为历史记录）</li>
+     *   <li>基于现有计划的参数构造新的生成请求</li>
+     *   <li>调用generatePlan()重新执行多目标优化生成新计划</li>
+     *   <li>将原有计划状态标记为"regenerated"，便于追溯历史</li>
+     *   <li>返回新生成的计划DTO</li>
+     * </ol>
+     *
+     * <p>物理意义：
+     * 当电价预测、负荷预测更新，或策略参数（如权重、充放电倍率）调整时，
+     * 需要重新生成调度计划以适应最新情况。原有计划作为历史版本保留，
+     * 便于进行版本对比和效果评估。
+     *
+     * @param planId 原有计划ID
+     * @return 重新生成的调度计划DTO
+     */
     @Override
     @Transactional(rollbackFor = Exception.class)
     public DispatchPlanDTO regeneratePlan(Long planId) {
@@ -200,6 +240,27 @@ public class DispatchPlanServiceImpl implements DispatchPlanService {
         log.info("调度计划已审批 - 计划ID: {}", planId);
     }
 
+    /**
+     * <p>执行当前时段调度计划 - 按照日前计划执行当前小时的充放电
+     * <p>核心逻辑：
+     * <ol>
+     *   <li>获取当前日期和当前小时（0-23）</li>
+     *   <li>查询今日的日前调度计划，如不存在则实时生成</li>
+     *   <li>查询当前小时的计划明细，获取该时段的电价、负荷、光伏、需量等预测数据</li>
+     *   <li>构造实时控制请求，将预测数据作为当前值传入</li>
+     *   <li>调用RealTimeStrategyService.executeRealTimeControl()执行实时控制</li>
+     *   <li>实时控制会根据优先级机制（需量控制 > 电池保护 > 计划执行）进行最终决策</li>
+     * </ol>
+     *
+     * <p>物理意义：
+     * 日前计划给出了每个小时的期望充放电功率，但实时控制会根据实际运行数据
+     * 进行动态调整，确保在满足约束条件的前提下，尽可能接近计划目标。
+     * 这种"计划+实时调整"的模式兼顾了优化的全局性和控制的灵活性。
+     *
+     * @param strategyCode 策略编码
+     * @param batterySn 电池序列号
+     * @return 实时控制结果，包含最终的充放电功率、预计SOC、预期收益等
+     */
     @Override
     public StrategyResultVO executeCurrentHour(String strategyCode, String batterySn) {
         log.info("执行当前时段计划 - 策略: {}", strategyCode);
@@ -239,6 +300,26 @@ public class DispatchPlanServiceImpl implements DispatchPlanService {
         return realTimeStrategyService.executeRealTimeControl(request);
     }
 
+    /**
+     * <p>计算调度计划的预期收益 - 汇总24小时充放电的各项收益和成本
+     * <p>核心逻辑：
+     * <ol>
+     *   <li>从时段明细表统计总充电电量、总放电电量、按小时计算的套利收益</li>
+     *   <li>从计划主表获取优化器计算的预期套利收益、预期寿命损耗、预期需量节省</li>
+     *   <li>计算净收益 = 预期套利收益 + 预期需量节省 - 预期寿命损耗</li>
+     *   <li>返回包含各项指标的Map，便于前端展示</li>
+     * </ol>
+     *
+     * <p>物理意义：
+     * 收益计算是评估调度计划优劣的核心指标，通过量化各项收益和成本，
+     * 可以直观地评估储能系统的投资回报率（ROI）。
+     * 净收益考虑了电池寿命损耗成本，是更真实的经济评价指标。
+     *
+     * @param planId 调度计划ID
+     * @return 包含各项收益指标的Map：totalChargeEnergy, totalDischargeEnergy,
+     *         totalRevenue, expectedRevenue, expectedDegradation,
+     *         expectedDemandSaving, netBenefit
+     */
     @Override
     public Map<String, BigDecimal> calculateExpectedBenefits(Long planId) {
         Map<String, BigDecimal> benefits = new HashMap<>();
@@ -343,6 +424,29 @@ public class DispatchPlanServiceImpl implements DispatchPlanService {
                 .collect(Collectors.toList());
     }
 
+    /**
+     * <p>生成滚动优化计划 - 每15分钟重新优化剩余时段的调度计划
+     * <p>核心逻辑：
+     * <ol>
+     *   <li>查询现有的日前计划，作为滚动优化的基础</li>
+     *   <li>获取滚动优化开始时刻前的最新SOC，作为优化的初始状态</li>
+     *   <li>从ForecastService获取最新的电价预测和负荷预测数据（可能已更新）</li>
+     *   <li>保留startHour之前的时段计划不变（已执行或正在执行）</li>
+     *   <li>调用optimizeDispatchPlan()重新优化startHour及以后的时段</li>
+     *   <li>删除原有时段明细，重新保存优化后的完整24小时计划</li>
+       *   <li>更新计划类型为"ROLLING"，记录滚动优化时间</li>
+     * </ol>
+     *
+     * <p>物理意义：
+     * 滚动优化是模型预测控制（MPC）的核心思想，通过不断地用最新的预测数据
+     * 重新优化剩余时段的计划，可以有效应对预测误差和实时波动，
+     * 提高调度策略的鲁棒性和实际收益。通常每15分钟执行一次滚动优化。
+     *
+     * @param strategyCode 策略编码
+     * @param planDate 计划日期
+     * @param startHour 滚动优化开始时段（0-23），此时段之前的计划保持不变
+     * @return 滚动优化后的调度计划DTO
+     */
     @Override
     @Transactional(rollbackFor = Exception.class)
     public DispatchPlanDTO generateRollingPlan(String strategyCode, LocalDate planDate, int startHour) {
@@ -401,6 +505,19 @@ public class DispatchPlanServiceImpl implements DispatchPlanService {
         return convertToDTO(existingPlan, true);
     }
 
+    /**
+     * <p>实体转换 - 将调度计划实体转换为DTO
+     * <p>核心逻辑：
+     * <ol>
+     *   <li>使用Spring BeanUtils进行主表属性拷贝</li>
+     *   <li>根据includeHours参数决定是否查询并设置24小时时段明细</li>
+     *   <li>时段明细按时段索引排序后设置到DTO中</li>
+     * </ol>
+     *
+     * @param plan 调度计划实体
+     * @param includeHours 是否包含24小时时段明细
+     * @return 调度计划DTO
+     */
     private DispatchPlanDTO convertToDTO(DispatchPlan plan, boolean includeHours) {
         DispatchPlanDTO dto = new DispatchPlanDTO();
         BeanUtils.copyProperties(plan, dto);
@@ -417,12 +534,26 @@ public class DispatchPlanServiceImpl implements DispatchPlanService {
         return dto;
     }
 
+    /**
+     * <p>实体转换 - 将调度计划时段实体转换为DTO
+     * <p>使用Spring BeanUtils进行属性拷贝，减少手动赋值代码。
+     *
+     * @param hour 调度计划时段实体
+     * @return 调度计划时段DTO
+     */
     private DispatchPlanHourDTO convertHourToDTO(DispatchPlanHour hour) {
         DispatchPlanHourDTO dto = new DispatchPlanHourDTO();
         BeanUtils.copyProperties(hour, dto);
         return dto;
     }
 
+    /**
+     * <p>实体转换 - 将调度计划DTO转换为实体
+     * <p>使用Spring BeanUtils进行属性拷贝，忽略planHours属性（需单独保存）。
+     *
+     * @param dto 调度计划DTO
+     * @return 调度计划实体
+     */
     private DispatchPlan convertToEntity(DispatchPlanDTO dto) {
         DispatchPlan plan = new DispatchPlan();
         BeanUtils.copyProperties(dto, plan, "planHours");

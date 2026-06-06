@@ -3,6 +3,7 @@ package com.ems.service.impl;
 import com.ems.common.exception.EmsException;
 import com.ems.domain.dto.strategy.*;
 import com.ems.domain.vo.strategy.StrategyResultVO;
+import com.ems.service.ForecastService;
 import com.ems.service.MultiObjectiveOptimizationService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -10,6 +11,7 @@ import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.time.LocalDate;
 import java.time.LocalTime;
 import java.util.*;
 
@@ -39,6 +41,9 @@ public class MultiObjectiveOptimizationServiceImpl implements MultiObjectiveOpti
     private static final BigDecimal DEFAULT_BATTERY_CAPACITY = new BigDecimal("1000");
     private static final BigDecimal DEFAULT_DEMAND_PRICE = new BigDecimal("35");
     private static final BigDecimal HOURS_PER_DAY = new BigDecimal("24");
+    private static final BigDecimal AVG_PRICE_REFERENCE = new BigDecimal("0.55");
+
+    private final ForecastService forecastService;
 
     @Override
     public StrategyResultVO optimize(RealTimeControlRequest request, StrategyConfigDTO config) {
@@ -116,6 +121,21 @@ public class MultiObjectiveOptimizationServiceImpl implements MultiObjectiveOpti
         return result;
     }
 
+    /**
+     * <p>日前多目标优化计划生成
+     * <p>核心逻辑：
+     * <ol>
+     *   <li>从ForecastService获取真实的电价预测和负荷预测数据（优先使用数据库中的分时电价表）</li>
+     *   <li>逐小时进行多目标优化，计算最优充放电功率</li>
+     *   <li>累计全天收益、损耗和需量节省</li>
+     *   <li>计算归一化的三项目标得分（套利/寿命/需量）</li>
+     *   <li>根据权重计算综合目标得分</li>
+     * </ol>
+     *
+     * @param request 计划生成请求，包含策略编码、日期、初始SOC等参数
+     * @param config  策略配置，包含权重、约束参数等
+     * @return 完整的24小时调度计划DTO
+     */
     @Override
     public DispatchPlanDTO optimizeDayAheadPlan(StrategyGenerateRequest request, StrategyConfigDTO config) {
         log.info("执行日前多目标优化 - 策略: {}, 日期: {}", config.getStrategyCode(), request.getPlanDate());
@@ -131,8 +151,26 @@ public class MultiObjectiveOptimizationServiceImpl implements MultiObjectiveOpti
         plan.setStatus("pending");
         plan.setCreatedBy(request.getCreatedBy());
 
-        List<PriceForecastDTO> priceForecast = generateMockPriceForecast(request.getPlanDate());
-        List<LoadForecastDTO> loadForecast = generateMockLoadForecast(request.getPlanDate(), request.getTransformerCode());
+        LocalDate planDate = request.getPlanDate() != null ? request.getPlanDate() : LocalDate.now();
+
+        List<PriceForecastDTO> priceForecast;
+        List<LoadForecastDTO> loadForecast;
+
+        if (Boolean.TRUE.equals(request.getUsePriceForecast())) {
+            log.debug("使用AI预测电价数据 - 日期: {}", planDate);
+            priceForecast = forecastService.generatePriceForecast(planDate, "AI_FORECAST");
+        } else {
+            log.debug("使用分时电价表生成电价预测 - 日期: {}", planDate);
+            priceForecast = forecastService.generatePriceForecastByTou(planDate);
+        }
+
+        if (Boolean.TRUE.equals(request.getUseLoadForecast()) && request.getTransformerCode() != null) {
+            log.debug("使用负荷预测数据 - 日期: {}, 变压器: {}", planDate, request.getTransformerCode());
+            loadForecast = forecastService.generateLoadForecast(planDate, request.getTransformerCode());
+        } else {
+            log.debug("使用历史相似日负荷数据 - 日期: {}", planDate);
+            loadForecast = forecastService.generateLoadForecast(planDate, request.getTransformerCode());
+        }
 
         List<DispatchPlanHourDTO> planHours = optimizeDispatchPlan(
                 priceForecast, loadForecast, plan.getInitialSoc(), config);
@@ -374,6 +412,35 @@ public class MultiObjectiveOptimizationServiceImpl implements MultiObjectiveOpti
         return excess.multiply(demandPrice != null ? demandPrice : DEFAULT_DEMAND_PRICE);
     }
 
+    /**
+     * <p>计算最优充放电功率 - 核心优化算法
+     * <p>算法原理：遍历41个可能的功率值（-1.0C 到 +1.0C，步长0.05C），
+     * 对每个功率计算三项目标得分并加权求和，选择综合得分最高的功率。
+     *
+     * <p>计算流程：
+     * <ol>
+     *   <li>从策略配置中获取约束参数（最大充放电倍率、SOC范围、需量阈值等）</li>
+     *   <li>计算功率搜索范围：从最大放电功率到最大充电功率，共41个采样点</li>
+     *   <li>对每个测试功率：
+     *     <ul>
+     *       <li>检查电池约束（SOC范围、充放电倍率限制）</li>
+     *       <li>计算新的需量值（原始负荷 + 充放电功率）</li>
+     *       <li>计算套利收益：根据当前电价和充放电功率计算</li>
+     *       <li>计算寿命损耗成本：考虑充放电倍率、温度等因素</li>
+     *       <li>计算三项目标归一化得分：[0,1]区间</li>
+     *       <li>根据权重计算综合目标得分</li>
+     *     </ul>
+     *   </li>
+     *   <li>选择综合得分最高的功率作为最优解</li>
+     * </ol>
+     *
+     * @param currentPrice     当前电价（元/kWh），用于计算套利收益
+     * @param currentLoad      当前负荷（kW），原始用电负荷
+     * @param currentSoc       当前SOC（%），电池当前荷电状态
+     * @param predictedDemand  预测需量（kW），滑动窗口预测的最大需量
+     * @param config           策略配置，包含权重和约束参数
+     * @return 包含最优功率、各项目标得分的Map
+     */
     @Override
     public Map<String, BigDecimal> calculateOptimalPower(BigDecimal currentPrice, BigDecimal currentLoad,
                                                           BigDecimal currentSoc, BigDecimal predictedDemand,
@@ -422,7 +489,7 @@ public class MultiObjectiveOptimizationServiceImpl implements MultiObjectiveOpti
             BigDecimal degradationCost = calculateDegradationCost(chargeRate, dischargeRate,
                     BigDecimal.ZERO, new BigDecimal("25"), config);
 
-            BigDecimal priceDiff = currentPrice.subtract(new BigDecimal("0.5"));
+            BigDecimal priceDiff = currentPrice != null ? currentPrice.subtract(AVG_PRICE_REFERENCE) : BigDecimal.ZERO;
             BigDecimal theoreticalMaxRevenue = maxDischargePower.divide(HOURS_PER_DAY, 4, RoundingMode.HALF_UP)
                     .multiply(priceDiff.abs()).multiply(DEFAULT_DISCHARGE_EFFICIENCY);
 
@@ -522,6 +589,28 @@ public class MultiObjectiveOptimizationServiceImpl implements MultiObjectiveOpti
         return newDemand.compareTo(threshold.multiply(new BigDecimal("1.2"))) <= 0;
     }
 
+    /**
+     * <p>计算电池寿命惩罚值 - 综合考虑多因素的衰减模型
+     * <p>惩罚因子构成：
+     * <ol>
+     *   <li>充电倍率惩罚：超过额定倍率按平方递增（惩罚系数10），基础线性惩罚0.5</li>
+     *   <li>放电倍率惩罚：同上，保护电池免受大电流冲击</li>
+     *   <li>放电深度(DOD)惩罚：超过阈值线性惩罚（系数0.2），基础惩罚0.01</li>
+     *   <li>温度惩罚：偏离25℃超过10℃时，每度额外惩罚0.1</li>
+     * </ol>
+     *
+     * <p>物理意义：
+     * 大倍率充放会导致SEI膜增厚、活性物质脱落；
+     * 深度放电会导致负极石墨层结构坍塌；
+     * 极端温度会加速电解液分解和电极腐蚀。
+     *
+     * @param chargeRate       充电倍率（C-rate），= 充电功率 / 额定容量
+     * @param dischargeRate    放电倍率（C-rate），= 放电功率 / 额定容量
+     * @param depthOfDischarge 放电深度（%），本次放电占总容量的比例
+     * @param temperature      电池温度（℃），最佳工作温度25℃
+     * @param config           策略配置，包含寿命约束参数
+     * @return 综合寿命惩罚值（无量纲，越小越好）
+     */
     @Override
     public BigDecimal calculateLifespanPenalty(BigDecimal chargeRate, BigDecimal dischargeRate,
                                                 BigDecimal depthOfDischarge, BigDecimal temperature,
@@ -604,6 +693,36 @@ public class MultiObjectiveOptimizationServiceImpl implements MultiObjectiveOpti
         return result;
     }
 
+    /**
+     * <p>逐小时优化调度计划 - 日前计划生成核心算法
+     * <p>算法流程：
+     * <ol>
+     *   <li>初始化参数：从策略配置获取SOC范围、充放电倍率、需量阈值等约束</li>
+     *   <li>构建电价和负荷的小时级索引Map，便于快速查询</li>
+     *   <li>计算全天最大负荷，作为需量控制的基准阈值</li>
+     *   <li>逐小时（0-23点）进行优化计算：
+     *     <ul>
+     *       <li>获取当前小时的电价、负荷、光伏出力预测数据</li>
+     *       <li>计算净负荷 = 原始负荷 - 光伏出力</li>
+     *       <li>调用calculateOptimalPower()计算该小时的最优充放电功率</li>
+     *       <li>计算执行后的预计SOC，若超出约束范围则修正功率</li>
+     *       <li>计算新的需量值 = 净负荷 + 充放电功率</li>
+     *       <li>计算该小时的套利收益、寿命损耗成本、需量节省</li>
+     *       <li>记录各项目标得分，更新当前SOC用于下一小时计算</li>
+     *     </ul>
+     *   </li>
+     * </ol>
+     *
+     * <p>SOC约束修正逻辑：
+     * - 若预计SOC < minSoc：强制增加充电功率，确保不低于最低SOC
+     * - 若预计SOC > maxSoc：强制减少充电功率（或增加放电），确保不高于最高SOC
+     *
+     * @param priceForecast 24小时电价预测列表，每小时一条记录
+     * @param loadForecast  24小时负荷/光伏预测列表，每小时一条记录
+     * @param initialSoc    初始SOC（%），0点时的电池荷电状态
+     * @param config        策略配置，包含权重和约束参数
+     * @return 24小时调度计划列表，包含每小时的功率、SOC、收益等信息
+     */
     @Override
     public List<DispatchPlanHourDTO> optimizeDispatchPlan(List<PriceForecastDTO> priceForecast,
                                                            List<LoadForecastDTO> loadForecast,
@@ -647,7 +766,7 @@ public class MultiObjectiveOptimizationServiceImpl implements MultiObjectiveOpti
             LoadForecastDTO lf = loadMap.get(hour);
 
             BigDecimal price = pf != null && pf.getForecastPrice() != null ?
-                    pf.getForecastPrice() : new BigDecimal("0.5");
+                    pf.getForecastPrice() : AVG_PRICE_REFERENCE;
             BigDecimal load = lf != null && lf.getForecastLoad() != null ?
                     lf.getForecastLoad() : new BigDecimal("300");
             BigDecimal pv = lf != null && lf.getForecastPv() != null ?
@@ -875,83 +994,5 @@ public class MultiObjectiveOptimizationServiceImpl implements MultiObjectiveOpti
         }
 
         return actions;
-    }
-
-    private List<PriceForecastDTO> generateMockPriceForecast(LocalDate date) {
-        List<PriceForecastDTO> forecast = new ArrayList<>();
-        BigDecimal[] prices = {
-                new BigDecimal("0.35"), new BigDecimal("0.32"), new BigDecimal("0.30"), new BigDecimal("0.28"),
-                new BigDecimal("0.28"), new BigDecimal("0.30"), new BigDecimal("0.38"), new BigDecimal("0.55"),
-                new BigDecimal("0.75"), new BigDecimal("0.85"), new BigDecimal("0.88"), new BigDecimal("0.82"),
-                new BigDecimal("0.78"), new BigDecimal("0.75"), new BigDecimal("0.72"), new BigDecimal("0.68"),
-                new BigDecimal("0.65"), new BigDecimal("0.70"), new BigDecimal("0.85"), new BigDecimal("0.95"),
-                new BigDecimal("0.90"), new BigDecimal("0.75"), new BigDecimal("0.55"), new BigDecimal("0.42")
-        };
-        String[] periodTypes = {
-                "VALLEY", "VALLEY", "VALLEY", "VALLEY",
-                "VALLEY", "VALLEY", "FLAT", "PEAK",
-                "PEAK", "CRITICAL_PEAK", "CRITICAL_PEAK", "PEAK",
-                "PEAK", "PEAK", "PEAK", "FLAT",
-                "FLAT", "FLAT", "PEAK", "CRITICAL_PEAK",
-                "CRITICAL_PEAK", "PEAK", "FLAT", "VALLEY"
-        };
-
-        for (int i = 0; i < 24; i++) {
-            PriceForecastDTO dto = new PriceForecastDTO();
-            dto.setForecastDate(date);
-            dto.setHourIndex(i);
-            dto.setStartTime(LocalTime.of(i, 0));
-            dto.setEndTime(LocalTime.of((i + 1) % 24, 0));
-            dto.setForecastPrice(prices[i]);
-            dto.setPeriodType(periodTypes[i]);
-            dto.setForecastSource("MOCK");
-            dto.setForecastModel("HISTORICAL_AVERAGE");
-            dto.setConfidenceLevel(new BigDecimal("0.85"));
-            dto.setIsPeak(periodTypes[i].contains("PEAK"));
-            dto.setIsValley("VALLEY".equals(periodTypes[i]));
-            forecast.add(dto);
-        }
-
-        return forecast;
-    }
-
-    private List<LoadForecastDTO> generateMockLoadForecast(LocalDate date, String transformerCode) {
-        List<LoadForecastDTO> forecast = new ArrayList<>();
-        BigDecimal[] loads = {
-                new BigDecimal("200"), new BigDecimal("180"), new BigDecimal("170"), new BigDecimal("160"),
-                new BigDecimal("165"), new BigDecimal("180"), new BigDecimal("220"), new BigDecimal("350"),
-                new BigDecimal("480"), new BigDecimal("550"), new BigDecimal("580"), new BigDecimal("560"),
-                new BigDecimal("540"), new BigDecimal("520"), new BigDecimal("500"), new BigDecimal("480"),
-                new BigDecimal("460"), new BigDecimal("500"), new BigDecimal("580"), new BigDecimal("620"),
-                new BigDecimal("580"), new BigDecimal("500"), new BigDecimal("380"), new BigDecimal("280")
-        };
-        BigDecimal[] pvs = {
-                BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO,
-                BigDecimal.ZERO, new BigDecimal("10"), new BigDecimal("80"), new BigDecimal("200"),
-                new BigDecimal("350"), new BigDecimal("450"), new BigDecimal("500"), new BigDecimal("480"),
-                new BigDecimal("450"), new BigDecimal("400"), new BigDecimal("350"), new BigDecimal("250"),
-                new BigDecimal("150"), new BigDecimal("50"), BigDecimal.ZERO, BigDecimal.ZERO,
-                BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO
-        };
-
-        for (int i = 0; i < 24; i++) {
-            LoadForecastDTO dto = new LoadForecastDTO();
-            dto.setForecastDate(date);
-            dto.setHourIndex(i);
-            dto.setStartTime(LocalTime.of(i, 0));
-            dto.setEndTime(LocalTime.of((i + 1) % 24, 0));
-            dto.setForecastLoad(loads[i]);
-            dto.setForecastPv(pvs[i]);
-            dto.setForecastGrid(loads[i].subtract(pvs[i]).max(BigDecimal.ZERO));
-            dto.setForecastType("DAY_AHEAD");
-            dto.setForecastSource("MOCK");
-            dto.setForecastModel("SIMILAR_DAY");
-            dto.setConfidenceLevel(new BigDecimal("0.80"));
-            dto.setIsPeakHour(loads[i].compareTo(new BigDecimal("500")) >= 0);
-            dto.setTransformerCode(transformerCode);
-            forecast.add(dto);
-        }
-
-        return forecast;
     }
 }

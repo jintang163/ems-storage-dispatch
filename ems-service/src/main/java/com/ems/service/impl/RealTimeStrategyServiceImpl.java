@@ -6,9 +6,11 @@ import com.ems.domain.entity.StrategyExecutionLog;
 import com.ems.domain.vo.strategy.StrategyResultVO;
 import com.ems.domain.vo.strategy.StrategyStatisticsVO;
 import com.ems.repository.StrategyExecutionLogRepository;
+import com.ems.service.ForecastService;
 import com.ems.service.MultiObjectiveOptimizationService;
 import com.ems.service.RealTimeStrategyService;
 import com.ems.service.StrategyConfigService;
+import com.ems.service.TimeOfUsePriceService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.BeanUtils;
@@ -45,6 +47,8 @@ public class RealTimeStrategyServiceImpl implements RealTimeStrategyService {
     private final StrategyConfigService strategyConfigService;
     private final MultiObjectiveOptimizationService optimizationService;
     private final StrategyExecutionLogRepository executionLogRepository;
+    private final ForecastService forecastService;
+    private final TimeOfUsePriceService timeOfUsePriceService;
 
     private static final BigDecimal WARNING_THRESHOLD_RATIO = new BigDecimal("0.80");
     private static final BigDecimal ALARM_THRESHOLD_RATIO = new BigDecimal("0.90");
@@ -190,6 +194,24 @@ public class RealTimeStrategyServiceImpl implements RealTimeStrategyService {
         return result;
     }
 
+    /**
+     * <p>执行峰谷套利控制 - 根据实时电价与平均电价的比值判断充放电时机
+     * <p>核心逻辑：
+     * <ol>
+     *   <li>从TimeOfUsePriceService获取分时电价表，计算加权平均电价</li>
+     *   <li>计算电价比值 = 当前电价 / 平均电价</li>
+     *   <li>当电价比值 < 0.85（谷段）且 SOC < maxSoc时，执行充电</li>
+     *   <li>当电价比值 > 1.15（峰段）且 SOC > minSoc时，执行放电</li>
+     *   <li>否则保持待机，等待更好的套利机会</li>
+     * </ol>
+     *
+     * <p>物理意义：
+     * 利用峰谷电价差进行"低买高卖"，在电价低谷时段充电储存电能，
+     * 在电价高峰时段放电获取收益。套利收益 = 放电收益 - 充电成本。
+     *
+     * @param request 实时控制请求，包含当前电价、SOC、电池温度等参数
+     * @return 峰谷套利控制结果，包含充放电功率、预计SOC、预期收益等
+     */
     @Override
     @Transactional(rollbackFor = Exception.class)
     public StrategyResultVO executePeakValleyArbitrage(RealTimeControlRequest request) {
@@ -211,7 +233,7 @@ public class RealTimeStrategyServiceImpl implements RealTimeStrategyService {
 
         BigDecimal currentPrice = request.getCurrentPrice() != null ?
                 request.getCurrentPrice() : new BigDecimal("0.5");
-        BigDecimal avgPrice = new BigDecimal("0.55");
+        BigDecimal avgPrice = calculateAveragePrice(request.getTransformerCode());
         BigDecimal currentSoc = request.getCurrentSoc() != null ?
                 request.getCurrentSoc() : new BigDecimal("50");
 
@@ -302,6 +324,24 @@ public class RealTimeStrategyServiceImpl implements RealTimeStrategyService {
         return result;
     }
 
+    /**
+     * <p>执行削峰控制 - 在负荷高峰时段通过放电降低峰值需量
+     * <p>核心逻辑：
+     * <ol>
+     *   <li>从ForecastService获取今日24小时负荷预测数据，计算全天平均负荷</li>
+     *   <li>削峰阈值 = 平均负荷 × 1.2（可配置），超过此阈值判定为负荷高峰</li>
+     *   <li>当当前负荷 > 削峰阈值 且 SOC > minSoc时，启动放电削峰</li>
+     *   <li>计算所需放电功率 = 当前负荷 - 平均负荷</li>
+     *   <li>考虑电池最大放电倍率和可用容量限制，取最小值作为实际放电功率</li>
+     * </ol>
+     *
+     * <p>物理意义：
+     * 通过在用电高峰时段释放电池储能，降低企业从电网的受电功率，
+     * 从而降低最大需量，减少需量电费支出。
+     *
+     * @param request 实时控制请求，包含当前负荷、SOC、电价等参数
+     * @return 削峰控制结果，包含放电功率、预计SOC、预期收益等
+     */
     @Override
     @Transactional(rollbackFor = Exception.class)
     public StrategyResultVO executePeakShaving(RealTimeControlRequest request) {
@@ -323,7 +363,8 @@ public class RealTimeStrategyServiceImpl implements RealTimeStrategyService {
 
         BigDecimal currentLoad = request.getCurrentLoad() != null ? request.getCurrentLoad() : BigDecimal.ZERO;
         BigDecimal currentSoc = request.getCurrentSoc() != null ? request.getCurrentSoc() : new BigDecimal("50");
-        BigDecimal avgLoad = new BigDecimal("400");
+
+        BigDecimal avgLoad = calculateAverageLoad(request.getTransformerCode());
         BigDecimal peakThreshold = avgLoad.multiply(new BigDecimal("1.2"));
 
         BigDecimal maxDischargeRate = config.getMaxDischargeRate() != null ?
@@ -383,6 +424,24 @@ public class RealTimeStrategyServiceImpl implements RealTimeStrategyService {
         return result;
     }
 
+    /**
+     * <p>执行填谷控制 - 在负荷低谷时段通过充电填补用电谷值
+     * <p>核心逻辑：
+     * <ol>
+     *   <li>从ForecastService获取今日24小时负荷预测数据，计算全天平均负荷</li>
+     *   <li>填谷阈值 = 平均负荷 × 0.7（可配置），低于此阈值判定为负荷低谷</li>
+     *   <li>当当前负荷 < 填谷阈值 且 SOC < maxSoc时，启动充电填谷</li>
+     *   <li>计算所需充电功率 = 平均负荷 - 当前负荷</li>
+     *   <li>考虑电池最大充电倍率和可用容量限制，取最小值作为实际充电功率</li>
+     * </ol>
+     *
+     * <p>物理意义：
+     * 通过在用电低谷时段给电池充电，利用低谷电价降低充电成本，
+     * 同时平滑负荷曲线，提高变压器和配电设施的利用率。
+     *
+     * @param request 实时控制请求，包含当前负荷、SOC、电价等参数
+     * @return 填谷控制结果，包含充电功率、预计SOC、预期收益等
+     */
     @Override
     @Transactional(rollbackFor = Exception.class)
     public StrategyResultVO executeValleyFilling(RealTimeControlRequest request) {
@@ -404,7 +463,8 @@ public class RealTimeStrategyServiceImpl implements RealTimeStrategyService {
 
         BigDecimal currentLoad = request.getCurrentLoad() != null ? request.getCurrentLoad() : BigDecimal.ZERO;
         BigDecimal currentSoc = request.getCurrentSoc() != null ? request.getCurrentSoc() : new BigDecimal("50");
-        BigDecimal avgLoad = new BigDecimal("400");
+
+        BigDecimal avgLoad = calculateAverageLoad(request.getTransformerCode());
         BigDecimal valleyThreshold = avgLoad.multiply(new BigDecimal("0.7"));
 
         BigDecimal maxChargeRate = config.getMaxChargeRate() != null ?
@@ -505,8 +565,30 @@ public class RealTimeStrategyServiceImpl implements RealTimeStrategyService {
         return reduction.add(margin).setScale(2, RoundingMode.HALF_UP);
     }
 
+    /**
+     * <p>计算所需充电功率 - 用于填谷场景的充电功率计算
+     * <p>核心逻辑：
+     * <ol>
+     *   <li>如果当前SOC已达上限，返回0，不充电</li>
+     *   <li>从ForecastService获取动态平均负荷，计算填谷阈值 = 平均负荷 × 0.7</li>
+     *   <li>如果当前负荷 >= 填谷阈值，说明不是负荷低谷，返回0</li>
+     *   <li>根据可用容量计算期望充电功率：(maxSoc - currentSoc) × 容量 × 2</li>
+     *   <li>取期望充电功率与最大充电功率（受限于C-rate）的较小值</li>
+     * </ol>
+     *
+     * <p>物理意义：
+     * 确保只有在真正的负荷低谷时段才进行充电，避免在平段或峰段充电增加电费支出。
+     * 充电功率同时受限于电池可用容量和最大充电倍率。
+     *
+     * @param strategyCode 策略编码
+     * @param transformerCode 变压器编码，用于获取对应负荷预测数据
+     * @param currentDemand 当前需量（kW）
+     * @param currentSoc 当前SOC（%）
+     * @return 所需充电功率（kW，正数表示充电）
+     */
     @Override
-    public BigDecimal calculateRequiredChargePower(String strategyCode, BigDecimal currentDemand, BigDecimal currentSoc) {
+    public BigDecimal calculateRequiredChargePower(String strategyCode, String transformerCode,
+                                                   BigDecimal currentDemand, BigDecimal currentSoc) {
         StrategyConfigDTO config = strategyConfigService.getByStrategyCode(strategyCode);
 
         BigDecimal maxSoc = config.getMaxSoc() != null ? config.getMaxSoc() : new BigDecimal("90");
@@ -516,7 +598,7 @@ public class RealTimeStrategyServiceImpl implements RealTimeStrategyService {
             return BigDecimal.ZERO;
         }
 
-        BigDecimal avgLoad = new BigDecimal("400");
+        BigDecimal avgLoad = calculateAverageLoad(transformerCode);
         BigDecimal demand = currentDemand != null ? currentDemand : avgLoad;
         BigDecimal valleyThreshold = avgLoad.multiply(new BigDecimal("0.7"));
 
@@ -831,13 +913,33 @@ public class RealTimeStrategyServiceImpl implements RealTimeStrategyService {
         executionLogRepository.save(log);
     }
 
+    /**
+     * <p>计算多目标优化得分 - 评估控制策略的综合表现
+     * <p>核心逻辑：
+     * <ol>
+     *   <li>从TimeOfUsePriceService获取真实分时电价数据，计算加权平均电价</li>
+     *   <li>套利得分：根据当前电价与平均电价的相对关系，充电时电价越低得分越高，放电时电价越高得分越高</li>
+     *   <li>寿命得分：根据充放电倍率（C-rate）计算，倍率越低得分越高，采用线性变换映射到[0.3, 1.0]区间</li>
+     *   <li>需量得分：控制后需量低于阈值得满分，超出部分按比例扣分</li>
+     *   <li>综合得分：三项得分加权求和，权重由策略配置决定</li>
+     * </ol>
+     *
+     * <p>物理意义：
+     * 通过量化三个维度的目标实现程度，为策略选择和调整提供可比较的评价指标。
+     * 所有得分均归一化到[0,1]区间，确保目标间的可加性。
+     *
+     * @param request 实时控制请求
+     * @param config 策略配置
+     * @param result 策略执行结果
+     * @return 包含各项得分的Map：arbitrageScore, lifespanScore, demandScore, totalScore
+     */
     private Map<String, BigDecimal> calculateScores(RealTimeControlRequest request,
                                                      StrategyConfigDTO config,
                                                      StrategyResultVO result) {
         Map<String, BigDecimal> scores = new HashMap<>();
 
         BigDecimal price = request.getCurrentPrice() != null ? request.getCurrentPrice() : new BigDecimal("0.5");
-        BigDecimal avgPrice = new BigDecimal("0.55");
+        BigDecimal avgPrice = calculateAveragePrice(request.getTransformerCode());
 
         BigDecimal arbitrageScore;
         if ("CHARGE".equals(result.getActionType()) && price.compareTo(avgPrice) < 0) {
@@ -885,6 +987,84 @@ public class RealTimeStrategyServiceImpl implements RealTimeStrategyService {
         return scores;
     }
 
+    /**
+     * <p>计算动态平均负荷 - 从负荷预测数据中获取
+     * <p>核心逻辑：
+     * <ol>
+     *   <li>调用ForecastService获取今日24小时负荷预测数据</li>
+     *   <li>计算全天平均负荷作为削峰填谷的基准</li>
+     *   <li>如果预测数据不可用，返回默认值400kW作为兜底</li>
+     * </ol>
+     *
+     * @param transformerCode 变压器编码
+     * @return 平均负荷（kW）
+     */
+    private BigDecimal calculateAverageLoad(String transformerCode) {
+        try {
+            List<BigDecimal> loadForecast = forecastService.generateLoadForecast(
+                    transformerCode, LocalDate.now(), LocalDate.now());
+            if (loadForecast != null && !loadForecast.isEmpty()) {
+                BigDecimal sum = BigDecimal.ZERO;
+                for (BigDecimal load : loadForecast) {
+                    if (load != null) {
+                        sum = sum.add(load);
+                    }
+                }
+                return sum.divide(new BigDecimal(loadForecast.size()), 4, RoundingMode.HALF_UP);
+            }
+        } catch (Exception e) {
+            log.warn("获取负荷预测数据失败，使用默认平均负荷: {}", e.getMessage());
+        }
+        return new BigDecimal("400");
+    }
+
+    /**
+     * <p>计算动态平均电价 - 从分时电价表中获取
+     * <p>核心逻辑：
+     * <ol>
+     *   <li>调用TimeOfUsePriceService获取今日有效的分时电价数据</li>
+     *   <li>计算加权平均电价作为峰谷套利的比较基准</li>
+     *   <li>如果电价数据不可用，返回默认值0.55元/kWh作为兜底</li>
+     * </ol>
+     *
+     * @param transformerCode 变压器编码
+     * @return 加权平均电价（元/kWh）
+     */
+    private BigDecimal calculateAveragePrice(String transformerCode) {
+        try {
+            List<TimeOfUsePriceDTO> prices = timeOfUsePriceService.listValidPrices(LocalDate.now());
+            if (prices != null && !prices.isEmpty()) {
+                BigDecimal totalWeightedPrice = BigDecimal.ZERO;
+                BigDecimal totalDuration = BigDecimal.ZERO;
+                for (TimeOfUsePriceDTO price : prices) {
+                    if (price != null && price.getPrice() != null && price.getDurationHours() != null) {
+                        totalWeightedPrice = totalWeightedPrice.add(
+                                price.getPrice().multiply(price.getDurationHours()));
+                        totalDuration = totalDuration.add(price.getDurationHours());
+                    }
+                }
+                if (totalDuration.compareTo(BigDecimal.ZERO) > 0) {
+                    return totalWeightedPrice.divide(totalDuration, 4, RoundingMode.HALF_UP);
+                }
+            }
+        } catch (Exception e) {
+            log.warn("获取分时电价数据失败，使用默认平均电价: {}", e.getMessage());
+        }
+        return new BigDecimal("0.55");
+    }
+
+    /**
+     * <p>判断当前时段类型 - 基于硬编码的峰谷时段划分
+     * <p>时段划分（可配置化）：
+     * <ul>
+     *   <li>CRITICAL_PEAK: 10:00-12:00, 18:00-21:00</li>
+     *   <li>PEAK: 07:00-10:00, 14:00-18:00</li>
+     *   <li>VALLEY: 23:00-06:00</li>
+     *   <li>FLAT: 其他时段</li>
+     * </ul>
+     *
+     * @return 时段类型字符串
+     */
     private String determinePeriodType() {
         int hour = LocalTime.now().getHour();
         if (hour >= 7 && hour < 10) return "PEAK";
@@ -895,6 +1075,13 @@ public class RealTimeStrategyServiceImpl implements RealTimeStrategyService {
         return "FLAT";
     }
 
+    /**
+     * <p>实体转换 - 将策略执行日志实体转换为DTO
+     * <p>使用Spring BeanUtils进行属性拷贝，减少手动赋值代码。
+     *
+     * @param log 策略执行日志实体
+     * @return 策略执行日志DTO
+     */
     private StrategyExecutionLogDTO convertToDTO(StrategyExecutionLog log) {
         StrategyExecutionLogDTO dto = new StrategyExecutionLogDTO();
         BeanUtils.copyProperties(log, dto);

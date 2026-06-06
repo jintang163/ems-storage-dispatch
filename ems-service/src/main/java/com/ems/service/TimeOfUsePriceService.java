@@ -3,6 +3,7 @@ package com.ems.service;
 import com.ems.domain.dto.price.TimeOfUsePriceDTO;
 
 import java.math.BigDecimal;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.List;
 
@@ -54,6 +55,13 @@ public interface TimeOfUsePriceService {
      * @return 有效电价DTO列表
      */
     List<TimeOfUsePriceDTO> listValidPrices();
+
+    /**
+     * 获取指定日期有效的电价配置列表
+     * @param date 指定日期
+     * @return 指定日期有效的电价DTO列表
+     */
+    List<TimeOfUsePriceDTO> listValidPrices(LocalDate date);
 
     /**
      * 获取当前时间段的电价
