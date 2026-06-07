@@ -100,4 +100,10 @@ public interface RealTimeStrategyService {
     Map<String, String> validateManualControlSafety(ManualForceChargeDischargeDTO request);
 
     Map<String, String> validateModeSwitchSafety(ModeSwitchDTO request);
+
+    Map<String, Object> checkManualModeGuard(String strategyCode);
+
+    boolean isManualModeActive(String strategyCode);
+
+    void expireManualControl(String strategyCode);
 }

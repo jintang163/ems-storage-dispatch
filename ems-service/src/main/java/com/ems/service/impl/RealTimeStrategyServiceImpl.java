@@ -2,10 +2,15 @@ package com.ems.service.impl;
 
 import com.ems.common.exception.EmsException;
 import com.ems.domain.dto.strategy.*;
+import com.ems.domain.entity.Device;
+import com.ems.domain.entity.DispatchCommand;
 import com.ems.domain.entity.StrategyConfig;
 import com.ems.domain.entity.StrategyExecutionLog;
 import com.ems.domain.vo.strategy.StrategyResultVO;
 import com.ems.domain.vo.strategy.StrategyStatisticsVO;
+import com.ems.mqtt.service.MqttPublisherService;
+import com.ems.repository.DeviceRepository;
+import com.ems.repository.DispatchCommandRepository;
 import com.ems.repository.StrategyConfigRepository;
 import com.ems.repository.StrategyExecutionLogRepository;
 import com.ems.service.ForecastService;
@@ -52,6 +57,9 @@ public class RealTimeStrategyServiceImpl implements RealTimeStrategyService {
     private final ForecastService forecastService;
     private final TimeOfUsePriceService timeOfUsePriceService;
     private final StrategyConfigRepository strategyConfigRepository;
+    private final MqttPublisherService mqttPublisherService;
+    private final DispatchCommandRepository dispatchCommandRepository;
+    private final DeviceRepository deviceRepository;
 
     private static final BigDecimal WARNING_THRESHOLD_RATIO = new BigDecimal("0.80");
     private static final BigDecimal ALARM_THRESHOLD_RATIO = new BigDecimal("0.90");
@@ -64,14 +72,28 @@ public class RealTimeStrategyServiceImpl implements RealTimeStrategyService {
     public StrategyResultVO executeRealTimeControl(RealTimeControlRequest request) {
         log.info("执行实时策略控制 - 策略: {}, 执行类型: {}", request.getStrategyCode(), request.getExecutionType());
 
-        StrategyConfig config = strategyConfigRepository.findByStrategyCode(request.getStrategyCode())
-                .orElseThrow(() -> new EmsException("策略不存在, 编码: " + request.getStrategyCode()));
+        Map<String, Object> guardResult = checkManualModeGuard(request.getStrategyCode());
+        boolean isManualMode = (Boolean) guardResult.getOrDefault("isManualMode", false);
+        boolean isExpired = (Boolean) guardResult.getOrDefault("isExpired", false);
 
-        if ("MANUAL".equals(config.getControlMode())) {
+        if (isManualMode && !isExpired) {
+            log.info("策略[{}]处于手动模式，自动策略执行被覆盖，返回手动控制结果", request.getStrategyCode());
+            StrategyConfig config = strategyConfigRepository.findByStrategyCode(request.getStrategyCode())
+                    .orElseThrow(() -> new EmsException("策略不存在, 编码: " + request.getStrategyCode()));
             StrategyResultVO manualResult = executeManualMode(request, config);
             logExecution(manualResult, request);
             return manualResult;
         }
+
+        if (isManualMode && isExpired) {
+            log.info("策略[{}]手动模式已超时，自动恢复自动模式", request.getStrategyCode());
+            StrategyConfig config = strategyConfigRepository.findByStrategyCode(request.getStrategyCode())
+                    .orElseThrow(() -> new EmsException("策略不存在, 编码: " + request.getStrategyCode()));
+            expireManualControl(config);
+        }
+
+        StrategyConfig config = strategyConfigRepository.findByStrategyCode(request.getStrategyCode())
+                .orElseThrow(() -> new EmsException("策略不存在, 编码: " + request.getStrategyCode()));
 
         StrategyConfigDTO configDTO = strategyConfigService.getByStrategyCode(request.getStrategyCode());
         String executionType = request.getExecutionType() != null ?
@@ -1194,6 +1216,51 @@ public class RealTimeStrategyServiceImpl implements RealTimeStrategyService {
             throw new EmsException("目标功率超过最大允许功率: " + maxPower.setScale(2, RoundingMode.HALF_UP) + " kW");
         }
 
+        String batterySn = config.getBatterySn();
+        if (batterySn == null || batterySn.isEmpty()) {
+            throw new EmsException("策略未配置电池设备编号，无法发送控制命令");
+        }
+
+        Device device = deviceRepository.findByDeviceSn(batterySn)
+                .orElseThrow(() -> new EmsException("设备不存在, 编号: " + batterySn));
+
+        double signedPower;
+        String commandType;
+        if ("CHARGE".equals(actionType)) {
+            signedPower = request.getTargetPower().negate().doubleValue();
+            commandType = "POWER_CONTROL";
+        } else {
+            signedPower = request.getTargetPower().doubleValue();
+            commandType = "POWER_CONTROL";
+        }
+
+        DispatchCommand dispatchCommand = new DispatchCommand();
+        dispatchCommand.setCommandType(commandType);
+        dispatchCommand.setDeviceId(device.getId());
+        dispatchCommand.setTargetPower(BigDecimal.valueOf(signedPower));
+        dispatchCommand.setDuration(request.getDurationSeconds());
+        dispatchCommand.setPriority(1);
+        dispatchCommand.setStatus("pending");
+        dispatchCommand.setCreatedBy(request.getOperator() != null ? request.getOperator() : "system");
+        dispatchCommand = dispatchCommandRepository.save(dispatchCommand);
+
+        try {
+            mqttPublisherService.sendPowerControl(batterySn, signedPower, request.getDurationSeconds());
+
+            dispatchCommand.setStatus("sent");
+            dispatchCommand.setSentTime(LocalDateTime.now());
+            dispatchCommand.setResultMessage("命令已通过MQTT发送");
+            dispatchCommandRepository.save(dispatchCommand);
+
+            log.info("MQTT命令发送成功 - 设备: {}, 命令: {}, 功率: {} kW", batterySn, commandType, signedPower);
+        } catch (Exception e) {
+            log.error("MQTT命令发送失败 - 设备: {}, 命令: {}", batterySn, commandType, e);
+            dispatchCommand.setStatus("failed");
+            dispatchCommand.setResultMessage("MQTT发送失败: " + e.getMessage());
+            dispatchCommandRepository.save(dispatchCommand);
+            throw new EmsException("控制命令发送失败: " + e.getMessage());
+        }
+
         config.setControlMode("MANUAL");
         config.setManualCommand(actionType);
         config.setManualTargetPower(request.getTargetPower());
@@ -1211,19 +1278,21 @@ public class RealTimeStrategyServiceImpl implements RealTimeStrategyService {
         result.setActionType(actionType);
         result.setTargetPower(request.getTargetPower());
         result.setUrgencyLevel("HIGH");
-        result.setMessage("手动强制" + ("CHARGE".equals(actionType) ? "充电" : "放电") + "已启动");
+        result.setMessage("手动强制" + ("CHARGE".equals(actionType) ? "充电" : "放电") + "已启动，命令已下发");
         result.setStatus("success");
 
         List<String> actions = new ArrayList<>();
         actions.add("手动" + ("CHARGE".equals(actionType) ? "充电" : "放电") +
                 " " + request.getTargetPower().setScale(2, RoundingMode.HALF_UP) + " kW");
         actions.add("持续时间: " + request.getDurationSeconds() + " 秒");
+        actions.add("设备: " + batterySn);
+        actions.add("调度命令ID: " + dispatchCommand.getId());
         actions.add("操作员: " + (request.getOperator() != null ? request.getOperator() : "未知"));
         result.setRecommendedActions(actions);
 
         logManualExecution(result, request);
 
-        log.info("手动强制充放电执行成功 - 策略: {}, 操作: {}", request.getStrategyCode(), actionType);
+        log.info("手动强制充放电执行成功 - 策略: {}, 操作: {}, 设备: {}", request.getStrategyCode(), actionType, batterySn);
         return result;
     }
 
@@ -1239,6 +1308,41 @@ public class RealTimeStrategyServiceImpl implements RealTimeStrategyService {
 
         StrategyConfig config = strategyConfigRepository.findByStrategyCode(request.getStrategyCode())
                 .orElseThrow(() -> new EmsException("策略不存在, 编码: " + request.getStrategyCode()));
+
+        String batterySn = config.getBatterySn();
+        if (batterySn == null || batterySn.isEmpty()) {
+            throw new EmsException("策略未配置电池设备编号，无法发送控制命令");
+        }
+
+        Device device = deviceRepository.findByDeviceSn(batterySn)
+                .orElseThrow(() -> new EmsException("设备不存在, 编号: " + batterySn));
+
+        DispatchCommand dispatchCommand = new DispatchCommand();
+        dispatchCommand.setCommandType("STOP");
+        dispatchCommand.setDeviceId(device.getId());
+        dispatchCommand.setTargetPower(BigDecimal.ZERO);
+        dispatchCommand.setDuration(request.getDurationSeconds());
+        dispatchCommand.setPriority(1);
+        dispatchCommand.setStatus("pending");
+        dispatchCommand.setCreatedBy(request.getOperator() != null ? request.getOperator() : "system");
+        dispatchCommand = dispatchCommandRepository.save(dispatchCommand);
+
+        try {
+            mqttPublisherService.sendStop(batterySn);
+
+            dispatchCommand.setStatus("sent");
+            dispatchCommand.setSentTime(LocalDateTime.now());
+            dispatchCommand.setResultMessage("待机命令已通过MQTT发送");
+            dispatchCommandRepository.save(dispatchCommand);
+
+            log.info("MQTT待机命令发送成功 - 设备: {}", batterySn);
+        } catch (Exception e) {
+            log.error("MQTT待机命令发送失败 - 设备: {}", batterySn, e);
+            dispatchCommand.setStatus("failed");
+            dispatchCommand.setResultMessage("MQTT发送失败: " + e.getMessage());
+            dispatchCommandRepository.save(dispatchCommand);
+            throw new EmsException("待机命令发送失败: " + e.getMessage());
+        }
 
         config.setControlMode("MANUAL");
         config.setManualCommand("IDLE");
@@ -1257,7 +1361,7 @@ public class RealTimeStrategyServiceImpl implements RealTimeStrategyService {
         result.setActionType("HOLD");
         result.setTargetPower(BigDecimal.ZERO);
         result.setUrgencyLevel("MEDIUM");
-        result.setMessage("强制待机已启动");
+        result.setMessage("强制待机已启动，命令已下发");
         result.setStatus("success");
 
         List<String> actions = new ArrayList<>();
@@ -1265,6 +1369,8 @@ public class RealTimeStrategyServiceImpl implements RealTimeStrategyService {
         if (request.getDurationSeconds() != null) {
             actions.add("持续时间: " + request.getDurationSeconds() + " 秒");
         }
+        actions.add("设备: " + batterySn);
+        actions.add("调度命令ID: " + dispatchCommand.getId());
         actions.add("操作员: " + (request.getOperator() != null ? request.getOperator() : "未知"));
         result.setRecommendedActions(actions);
 
@@ -1280,7 +1386,7 @@ public class RealTimeStrategyServiceImpl implements RealTimeStrategyService {
         execLog.setStrategyId(config.getId());
         executionLogRepository.save(execLog);
 
-        log.info("强制待机执行成功 - 策略: {}", request.getStrategyCode());
+        log.info("强制待机执行成功 - 策略: {}, 设备: {}", request.getStrategyCode(), batterySn);
         return result;
     }
 
@@ -1498,6 +1604,35 @@ public class RealTimeStrategyServiceImpl implements RealTimeStrategyService {
             throw new EmsException("当前不是手动模式，无需取消");
         }
 
+        String batterySn = config.getBatterySn();
+        if (batterySn != null && !batterySn.isEmpty()) {
+            Device device = deviceRepository.findByDeviceSn(batterySn).orElse(null);
+            if (device != null) {
+                DispatchCommand dispatchCommand = new DispatchCommand();
+                dispatchCommand.setCommandType("STOP");
+                dispatchCommand.setDeviceId(device.getId());
+                dispatchCommand.setTargetPower(BigDecimal.ZERO);
+                dispatchCommand.setPriority(1);
+                dispatchCommand.setStatus("pending");
+                dispatchCommand.setCreatedBy(operator != null ? operator : "system");
+                dispatchCommand = dispatchCommandRepository.save(dispatchCommand);
+
+                try {
+                    mqttPublisherService.sendStop(batterySn);
+                    dispatchCommand.setStatus("sent");
+                    dispatchCommand.setSentTime(LocalDateTime.now());
+                    dispatchCommand.setResultMessage("取消手动控制，停止命令已通过MQTT发送");
+                    dispatchCommandRepository.save(dispatchCommand);
+                    log.info("MQTT停止命令发送成功 - 设备: {}", batterySn);
+                } catch (Exception e) {
+                    log.error("MQTT停止命令发送失败 - 设备: {}", batterySn, e);
+                    dispatchCommand.setStatus("failed");
+                    dispatchCommand.setResultMessage("MQTT发送失败: " + e.getMessage());
+                    dispatchCommandRepository.save(dispatchCommand);
+                }
+            }
+        }
+
         config.setControlMode("AUTO");
         config.setManualCommand(null);
         config.setManualTargetPower(null);
@@ -1630,5 +1765,124 @@ public class RealTimeStrategyServiceImpl implements RealTimeStrategyService {
         log.setErrorMessage(request.getRemark());
         log.setStrategyId(strategyConfigService.getByStrategyCode(request.getStrategyCode()).getId());
         executionLogRepository.save(log);
+    }
+
+    @Override
+    public Map<String, Object> checkManualModeGuard(String strategyCode) {
+        Map<String, Object> result = new HashMap<>();
+
+        StrategyConfig config = strategyConfigRepository.findByStrategyCode(strategyCode)
+                .orElseThrow(() -> new EmsException("策略不存在, 编码: " + strategyCode));
+
+        result.put("strategyCode", strategyCode);
+        result.put("controlMode", config.getControlMode());
+        result.put("isManualMode", "MANUAL".equals(config.getControlMode()));
+
+        if ("MANUAL".equals(config.getControlMode())) {
+            result.put("manualCommand", config.getManualCommand());
+            result.put("manualTargetPower", config.getManualTargetPower());
+            result.put("manualStartTime", config.getManualStartTime());
+            result.put("manualDuration", config.getManualDuration());
+
+            if (config.getManualStartTime() != null && config.getManualDuration() != null) {
+                LocalDateTime endTime = config.getManualStartTime().plusSeconds(config.getManualDuration());
+                result.put("manualEndTime", endTime);
+                long remainingSeconds = java.time.Duration.between(LocalDateTime.now(), endTime).getSeconds();
+                result.put("remainingSeconds", Math.max(0, remainingSeconds));
+                result.put("isExpired", remainingSeconds <= 0);
+            }
+
+            result.put("warning", "当前处于手动模式，自动策略执行将被覆盖。" +
+                    "如需执行自动策略，请先切换到自动模式或取消手动控制。");
+        } else {
+            result.put("isExpired", false);
+            result.put("remainingSeconds", 0);
+        }
+
+        return result;
+    }
+
+    @Override
+    public boolean isManualModeActive(String strategyCode) {
+        StrategyConfig config = strategyConfigRepository.findByStrategyCode(strategyCode).orElse(null);
+        if (config == null) {
+            return false;
+        }
+
+        if (!"MANUAL".equals(config.getControlMode())) {
+            return false;
+        }
+
+        if (config.getManualStartTime() != null && config.getManualDuration() != null) {
+            LocalDateTime endTime = config.getManualStartTime().plusSeconds(config.getManualDuration());
+            if (LocalDateTime.now().isAfter(endTime)) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void expireManualControl(String strategyCode) {
+        StrategyConfig config = strategyConfigRepository.findByStrategyCode(strategyCode)
+                .orElseThrow(() -> new EmsException("策略不存在, 编码: " + strategyCode));
+        expireManualControl(config);
+    }
+
+    @Transactional(rollbackFor = Exception.class)
+    public void expireManualControl(StrategyConfig config) {
+        log.info("手动控制超时，自动恢复自动模式 - 策略: {}", config.getStrategyCode());
+
+        String batterySn = config.getBatterySn();
+        if (batterySn != null && !batterySn.isEmpty()) {
+            Device device = deviceRepository.findByDeviceSn(batterySn).orElse(null);
+            if (device != null) {
+                DispatchCommand dispatchCommand = new DispatchCommand();
+                dispatchCommand.setCommandType("STOP");
+                dispatchCommand.setDeviceId(device.getId());
+                dispatchCommand.setTargetPower(BigDecimal.ZERO);
+                dispatchCommand.setPriority(1);
+                dispatchCommand.setStatus("pending");
+                dispatchCommand.setCreatedBy("system");
+                dispatchCommand = dispatchCommandRepository.save(dispatchCommand);
+
+                try {
+                    mqttPublisherService.sendStop(batterySn);
+                    dispatchCommand.setStatus("sent");
+                    dispatchCommand.setSentTime(LocalDateTime.now());
+                    dispatchCommand.setResultMessage("手动控制超时，自动发送停止命令");
+                    dispatchCommandRepository.save(dispatchCommand);
+                    log.info("MQTT超时停止命令发送成功 - 设备: {}", batterySn);
+                } catch (Exception e) {
+                    log.error("MQTT超时停止命令发送失败 - 设备: {}", batterySn, e);
+                    dispatchCommand.setStatus("failed");
+                    dispatchCommand.setResultMessage("MQTT发送失败: " + e.getMessage());
+                    dispatchCommandRepository.save(dispatchCommand);
+                }
+            }
+        }
+
+        config.setControlMode("AUTO");
+        config.setManualCommand(null);
+        config.setManualTargetPower(null);
+        config.setManualDuration(null);
+        config.setManualStartTime(null);
+        config.setSafetyConfirmed(false);
+        strategyConfigRepository.save(config);
+
+        StrategyExecutionLog execLog = new StrategyExecutionLog();
+        execLog.setStrategyCode(config.getStrategyCode());
+        execLog.setExecutionTime(LocalDateTime.now());
+        execLog.setExecutionType("MANUAL_TIMEOUT");
+        execLog.setActionTaken("HOLD");
+        execLog.setTargetPower(BigDecimal.ZERO);
+        execLog.setStatus("success");
+        execLog.setErrorMessage("手动控制超时，自动恢复自动模式");
+        execLog.setStrategyId(config.getId());
+        executionLogRepository.save(execLog);
+
+        log.info("手动控制超时恢复完成 - 策略: {}", config.getStrategyCode());
     }
 }

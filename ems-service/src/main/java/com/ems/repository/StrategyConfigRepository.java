@@ -39,4 +39,7 @@ public interface StrategyConfigRepository extends JpaRepository<StrategyConfig, 
 
     @Query("SELECT COUNT(s) FROM StrategyConfig s WHERE s.enabled = true")
     long countEnabled();
+
+    @Query("SELECT s FROM StrategyConfig s WHERE s.controlMode = 'MANUAL' AND s.manualStartTime IS NOT NULL AND s.manualDuration IS NOT NULL")
+    List<StrategyConfig> findAllActiveManualControls();
 }

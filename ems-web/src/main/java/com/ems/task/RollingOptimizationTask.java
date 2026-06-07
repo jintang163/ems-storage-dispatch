@@ -3,6 +3,7 @@ package com.ems.task;
 import com.ems.domain.dto.strategy.StrategyConfigDTO;
 import com.ems.service.DispatchPlanService;
 import com.ems.service.PythonOptimizerService;
+import com.ems.service.RealTimeStrategyService;
 import com.ems.service.StrategyConfigService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -38,6 +39,7 @@ public class RollingOptimizationTask {
     private final DispatchPlanService dispatchPlanService;
     private final StrategyConfigService strategyConfigService;
     private final PythonOptimizerService pythonOptimizerService;
+    private final RealTimeStrategyService realTimeStrategyService;
 
     /**
      * 每15分钟执行一次滚动优化
@@ -75,6 +77,11 @@ public class RollingOptimizationTask {
             for (StrategyConfigDTO strategy : strategies) {
                 if (!"ENABLED".equals(strategy.getStatus())) {
                     log.debug("策略[{}]未启用，跳过", strategy.getStrategyCode());
+                    continue;
+                }
+
+                if (realTimeStrategyService.isManualModeActive(strategy.getStrategyCode())) {
+                    log.warn("策略[{}]处于手动模式，跳过滚动优化", strategy.getStrategyCode());
                     continue;
                 }
 
@@ -137,6 +144,11 @@ public class RollingOptimizationTask {
 
             for (StrategyConfigDTO strategy : strategies) {
                 if (!"ENABLED".equals(strategy.getStatus())) {
+                    continue;
+                }
+
+                if (realTimeStrategyService.isManualModeActive(strategy.getStrategyCode())) {
+                    log.warn("策略[{}]处于手动模式，跳过完整优化", strategy.getStrategyCode());
                     continue;
                 }
 
