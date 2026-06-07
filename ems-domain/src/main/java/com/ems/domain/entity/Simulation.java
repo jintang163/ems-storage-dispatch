@@ -164,6 +164,15 @@ public class Simulation extends BaseEntity {
     @OneToMany(mappedBy = "simulation", cascade = CascadeType.ALL, orphanRemoval = true)
     private List<SimulationHourData> hourData = new ArrayList<>();
 
+    @Transient
+    private List<com.ems.domain.dto.simulation.SimulationDataPointDTO> loadData;
+
+    @Transient
+    private List<com.ems.domain.dto.simulation.SimulationDataPointDTO> pvData;
+
+    @Transient
+    private List<com.ems.domain.dto.simulation.SimulationDataPointDTO> priceData;
+
     public void addHourData(SimulationHourData data) {
         hourData.add(data);
         data.setSimulation(this);

@@ -54,10 +54,60 @@ public class SimulationServiceImpl implements SimulationService {
         BeanUtils.copyProperties(request, simulation);
         simulation.setStatus("PENDING");
 
+        if (request.getLoadData() != null || request.getPvData() != null || request.getPriceData() != null) {
+            List<SimulationHourData> initialHourData = createInitialHourData(request, simulation);
+            for (SimulationHourData hourData : initialHourData) {
+                simulation.addHourData(hourData);
+            }
+        }
+
         simulation = simulationRepository.save(simulation);
         log.info("仿真任务创建成功, ID: {}", simulation.getId());
 
         return convertToVO(simulation, false);
+    }
+
+    private List<SimulationHourData> createInitialHourData(SimulationRequestDTO request, Simulation simulation) {
+        List<SimulationHourData> hourDataList = new ArrayList<>();
+
+        Map<Integer, BigDecimal> loadMap = request.getLoadData() != null ?
+                dataPointListToMap(request.getLoadData()) : new HashMap<>();
+        Map<Integer, BigDecimal> pvMap = request.getPvData() != null ?
+                dataPointListToMap(request.getPvData()) : new HashMap<>();
+        Map<Integer, BigDecimal> priceMap = request.getPriceData() != null ?
+                dataPointListToMap(request.getPriceData()) : new HashMap<>();
+
+        LocalDate simDate = simulation.getSimulationDate() != null ? simulation.getSimulationDate() : LocalDate.now();
+
+        for (int i = 0; i < 24; i++) {
+            SimulationHourData hourData = new SimulationHourData();
+            hourData.setSimulation(simulation);
+            hourData.setHourIndex(i);
+            hourData.setStartTime(LocalTime.of(i, 0));
+            hourData.setEndTime(LocalTime.of((i + 1) % 24, 0));
+            hourData.setLoadPower(loadMap.getOrDefault(i, BigDecimal.ZERO));
+            hourData.setPvPower(pvMap.getOrDefault(i, BigDecimal.ZERO));
+            hourData.setPrice(priceMap.getOrDefault(i, BigDecimal.ZERO));
+            hourData.setExpectedSoc(simulation.getInitialSoc());
+            hourData.setBatteryPower(BigDecimal.ZERO);
+            hourData.setBatteryEnergy(BigDecimal.ZERO);
+            hourData.setActionType("IDLE");
+            hourData.setRevenue(BigDecimal.ZERO);
+            hourData.setCumulativeRevenue(BigDecimal.ZERO);
+            hourData.setSoh(BigDecimal.ONE);
+            hourDataList.add(hourData);
+        }
+
+        return hourDataList;
+    }
+
+    private Map<Integer, BigDecimal> dataPointListToMap(List<com.ems.domain.dto.simulation.SimulationDataPointDTO> dataPoints) {
+        Map<Integer, BigDecimal> map = new HashMap<>();
+        for (com.ems.domain.dto.simulation.SimulationDataPointDTO point : dataPoints) {
+            int hourIndex = point.getHourIndex() != null ? point.getHourIndex() : point.getStartTime().getHour();
+            map.put(hourIndex, point.getValue());
+        }
+        return map;
     }
 
     @Override
@@ -113,19 +163,50 @@ public class SimulationServiceImpl implements SimulationService {
                 .orElseThrow(() -> new EmsException("仿真任务不存在, ID: " + id));
 
         SimulationRequestDTO request = convertToRequestDTO(existing);
-        Simulation simulation = simulationEngine.executeSimulation(request, strategyType);
-        simulation.setId(id);
+        Simulation resultSimulation = simulationEngine.executeSimulation(request, strategyType);
 
+        existing.getHourData().clear();
         hourDataRepository.deleteBySimulationId(id);
 
-        for (SimulationHourData hourData : simulation.getHourData()) {
-            hourData.setSimulation(simulation);
+        existing.setStrategyType(strategyType);
+        existing.setStatus(resultSimulation.getStatus());
+        existing.setStartedAt(resultSimulation.getStartedAt());
+        existing.setCompletedAt(resultSimulation.getCompletedAt());
+        existing.setErrorMessage(resultSimulation.getErrorMessage());
+
+        existing.setTotalRevenue(resultSimulation.getTotalRevenue());
+        existing.setTotalArbitrageRevenue(resultSimulation.getTotalArbitrageRevenue());
+        existing.setTotalDemandSaving(resultSimulation.getTotalDemandSaving());
+        existing.setTotalDegradationCost(resultSimulation.getTotalDegradationCost());
+        existing.setNetRevenue(resultSimulation.getNetRevenue());
+        existing.setTotalChargeEnergy(resultSimulation.getTotalChargeEnergy());
+        existing.setTotalDischargeEnergy(resultSimulation.getTotalDischargeEnergy());
+        existing.setCycleCount(resultSimulation.getCycleCount());
+        existing.setAvgDepthOfDischarge(resultSimulation.getAvgDepthOfDischarge());
+        existing.setMaxDemand(resultSimulation.getMaxDemand());
+        existing.setMinDemand(resultSimulation.getMinDemand());
+        existing.setAvgDemand(resultSimulation.getAvgDemand());
+        existing.setDemandPeakReduction(resultSimulation.getDemandPeakReduction());
+        existing.setSohStart(resultSimulation.getSohStart());
+        existing.setSohEnd(resultSimulation.getSohEnd());
+        existing.setSohDegradation(resultSimulation.getSohDegradation());
+        existing.setEstimatedRemainingCycles(resultSimulation.getEstimatedRemainingCycles());
+        existing.setEstimatedRemainingLifespanYears(resultSimulation.getEstimatedRemainingLifespanYears());
+        existing.setSelfConsumptionRate(resultSimulation.getSelfConsumptionRate());
+        existing.setSelfSufficiencyRate(resultSimulation.getSelfSufficiencyRate());
+        existing.setRoundTripEfficiency(resultSimulation.getRoundTripEfficiency());
+        existing.setDemandThreshold(resultSimulation.getDemandThreshold());
+        existing.setDemandPrice(resultSimulation.getDemandPrice());
+
+        for (SimulationHourData hourData : resultSimulation.getHourData()) {
+            existing.addHourData(hourData);
         }
 
-        simulation = simulationRepository.save(simulation);
-        log.info("仿真任务执行完成, ID: {}, 状态: {}", id, simulation.getStatus());
+        existing = simulationRepository.save(existing);
+        log.info("仿真任务执行完成, ID: {}, 状态: {}, 小时数据条数: {}",
+                id, existing.getStatus(), existing.getHourData().size());
 
-        return convertToVO(simulation, true);
+        return convertToVO(existing, true);
     }
 
     @Override
@@ -503,44 +584,61 @@ public class SimulationServiceImpl implements SimulationService {
         SimulationRequestDTO request = new SimulationRequestDTO();
         BeanUtils.copyProperties(simulation, request);
 
-        List<SimulationHourData> hourDataList = hourDataRepository.findBySimulationIdOrderByHourIndexAsc(simulation.getId());
-
-        List<SimulationDataPointDTO> loadData = new ArrayList<>();
-        List<SimulationDataPointDTO> pvData = new ArrayList<>();
-        List<SimulationDataPointDTO> priceData = new ArrayList<>();
-
-        for (SimulationHourData hourData : hourDataList) {
-            SimulationDataPointDTO loadPoint = new SimulationDataPointDTO();
-            loadPoint.setDate(simulation.getSimulationDate());
-            loadPoint.setStartTime(hourData.getStartTime());
-            loadPoint.setEndTime(hourData.getEndTime());
-            loadPoint.setHourIndex(hourData.getHourIndex());
-            loadPoint.setValue(hourData.getLoadPower());
-            loadData.add(loadPoint);
-
-            if (hourData.getPvPower() != null) {
-                SimulationDataPointDTO pvPoint = new SimulationDataPointDTO();
-                pvPoint.setDate(simulation.getSimulationDate());
-                pvPoint.setStartTime(hourData.getStartTime());
-                pvPoint.setEndTime(hourData.getEndTime());
-                pvPoint.setHourIndex(hourData.getHourIndex());
-                pvPoint.setValue(hourData.getPvPower());
-                pvData.add(pvPoint);
-            }
-
-            SimulationDataPointDTO pricePoint = new SimulationDataPointDTO();
-            pricePoint.setDate(simulation.getSimulationDate());
-            pricePoint.setStartTime(hourData.getStartTime());
-            pricePoint.setEndTime(hourData.getEndTime());
-            pricePoint.setHourIndex(hourData.getHourIndex());
-            pricePoint.setValue(hourData.getPrice());
-            pricePoint.setPeriodType(hourData.getPeriodType());
-            priceData.add(pricePoint);
+        if (simulation.getLoadData() != null || simulation.getPvData() != null || simulation.getPriceData() != null) {
+            request.setLoadData(simulation.getLoadData());
+            request.setPvData(simulation.getPvData());
+            request.setPriceData(simulation.getPriceData());
+            return request;
         }
 
-        request.setLoadData(loadData);
-        request.setPvData(pvData.isEmpty() ? null : pvData);
-        request.setPriceData(priceData);
+        List<SimulationHourData> hourDataList = hourDataRepository.findBySimulationIdOrderByHourIndexAsc(simulation.getId());
+
+        if (hourDataList != null && !hourDataList.isEmpty()) {
+            List<SimulationDataPointDTO> loadData = new ArrayList<>();
+            List<SimulationDataPointDTO> pvData = new ArrayList<>();
+            List<SimulationDataPointDTO> priceData = new ArrayList<>();
+
+            boolean hasValidLoadData = hourDataList.stream()
+                    .anyMatch(h -> h.getLoadPower() != null && h.getLoadPower().compareTo(BigDecimal.ZERO) > 0);
+            boolean hasValidPriceData = hourDataList.stream()
+                    .anyMatch(h -> h.getPrice() != null && h.getPrice().compareTo(BigDecimal.ZERO) > 0);
+            boolean hasValidData = hasValidLoadData || hasValidPriceData;
+
+            if (hasValidData) {
+                for (SimulationHourData hourData : hourDataList) {
+                    SimulationDataPointDTO loadPoint = new SimulationDataPointDTO();
+                    loadPoint.setDate(simulation.getSimulationDate());
+                    loadPoint.setStartTime(hourData.getStartTime());
+                    loadPoint.setEndTime(hourData.getEndTime());
+                    loadPoint.setHourIndex(hourData.getHourIndex());
+                    loadPoint.setValue(hourData.getLoadPower() != null ? hourData.getLoadPower() : BigDecimal.ZERO);
+                    loadData.add(loadPoint);
+
+                    if (hourData.getPvPower() != null && hourData.getPvPower().compareTo(BigDecimal.ZERO) > 0) {
+                        SimulationDataPointDTO pvPoint = new SimulationDataPointDTO();
+                        pvPoint.setDate(simulation.getSimulationDate());
+                        pvPoint.setStartTime(hourData.getStartTime());
+                        pvPoint.setEndTime(hourData.getEndTime());
+                        pvPoint.setHourIndex(hourData.getHourIndex());
+                        pvPoint.setValue(hourData.getPvPower());
+                        pvData.add(pvPoint);
+                    }
+
+                    SimulationDataPointDTO pricePoint = new SimulationDataPointDTO();
+                    pricePoint.setDate(simulation.getSimulationDate());
+                    pricePoint.setStartTime(hourData.getStartTime());
+                    pricePoint.setEndTime(hourData.getEndTime());
+                    pricePoint.setHourIndex(hourData.getHourIndex());
+                    pricePoint.setValue(hourData.getPrice() != null ? hourData.getPrice() : BigDecimal.ZERO);
+                    pricePoint.setPeriodType(hourData.getPeriodType());
+                    priceData.add(pricePoint);
+                }
+
+                request.setLoadData(loadData);
+                request.setPvData(pvData.isEmpty() ? null : pvData);
+                request.setPriceData(priceData);
+            }
+        }
 
         return request;
     }

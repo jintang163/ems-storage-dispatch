@@ -51,6 +51,10 @@ public class StrategySimulationEngine {
             calculateBatteryDegradation(simulation, hourDataList);
             calculateEconomicMetrics(simulation, hourDataList);
 
+            for (SimulationHourData hourData : hourDataList) {
+                simulation.addHourData(hourData);
+            }
+
             simulation.setStatus("COMPLETED");
             simulation.setCompletedAt(LocalDateTime.now());
             log.info("策略仿真完成 - 策略类型: {}, 总收益: {}, 净收益: {}",
