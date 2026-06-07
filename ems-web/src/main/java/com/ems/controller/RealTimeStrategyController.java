@@ -1,8 +1,12 @@
 package com.ems.controller;
 
 import com.ems.common.result.Result;
+import com.ems.domain.dto.strategy.ManualForceChargeDischargeDTO;
+import com.ems.domain.dto.strategy.ManualStandbyDTO;
+import com.ems.domain.dto.strategy.ModeSwitchDTO;
 import com.ems.domain.dto.strategy.RealTimeControlRequest;
 import com.ems.domain.dto.strategy.StrategyExecutionLogDTO;
+import com.ems.domain.dto.strategy.StrategyParamAdjustDTO;
 import com.ems.domain.vo.strategy.StrategyResultVO;
 import com.ems.domain.vo.strategy.StrategyStatisticsVO;
 import com.ems.service.RealTimeStrategyService;
@@ -172,5 +176,53 @@ public class RealTimeStrategyController {
             @RequestParam BigDecimal controlledDemand) {
         return Result.success(realTimeStrategyService.calculateDemandChargeSaving(
                 strategyCode, originalDemand, controlledDemand));
+    }
+
+    @PostMapping("/manual/force-charge-discharge")
+    public Result<StrategyResultVO> executeManualForceChargeDischarge(
+            @Valid @RequestBody ManualForceChargeDischargeDTO request) {
+        return Result.success(realTimeStrategyService.executeManualForceChargeDischarge(request));
+    }
+
+    @PostMapping("/manual/standby")
+    public Result<StrategyResultVO> executeManualStandby(@Valid @RequestBody ManualStandbyDTO request) {
+        return Result.success(realTimeStrategyService.executeManualStandby(request));
+    }
+
+    @PostMapping("/manual/cancel/{strategyCode}")
+    public Result<Void> cancelManualControl(
+            @PathVariable String strategyCode,
+            @RequestParam(required = false) String operator,
+            @RequestParam(required = false) String remark) {
+        realTimeStrategyService.cancelManualControl(strategyCode, operator, remark);
+        return Result.success();
+    }
+
+    @PostMapping("/parameters/adjust")
+    public Result<StrategyResultVO> adjustStrategyParameters(
+            @Valid @RequestBody StrategyParamAdjustDTO request) {
+        return Result.success(realTimeStrategyService.adjustStrategyParameters(request));
+    }
+
+    @PostMapping("/mode/switch")
+    public Result<Map<String, Object>> switchControlMode(@Valid @RequestBody ModeSwitchDTO request) {
+        return Result.success(realTimeStrategyService.switchControlMode(request));
+    }
+
+    @GetMapping("/mode/status/{strategyCode}")
+    public Result<Map<String, Object>> getControlModeStatus(@PathVariable String strategyCode) {
+        return Result.success(realTimeStrategyService.getControlModeStatus(strategyCode));
+    }
+
+    @PostMapping("/safety/validate/manual")
+    public Result<Map<String, String>> validateManualControlSafety(
+            @Valid @RequestBody ManualForceChargeDischargeDTO request) {
+        return Result.success(realTimeStrategyService.validateManualControlSafety(request));
+    }
+
+    @PostMapping("/safety/validate/mode-switch")
+    public Result<Map<String, String>> validateModeSwitchSafety(
+            @Valid @RequestBody ModeSwitchDTO request) {
+        return Result.success(realTimeStrategyService.validateModeSwitchSafety(request));
     }
 }

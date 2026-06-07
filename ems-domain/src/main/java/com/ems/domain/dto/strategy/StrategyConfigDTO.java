@@ -7,6 +7,7 @@ import jakarta.validation.constraints.NotNull;
 import lombok.Data;
 
 import java.math.BigDecimal;
+import java.time.LocalDateTime;
 
 @Data
 public class StrategyConfigDTO {
@@ -92,4 +93,22 @@ public class StrategyConfigDTO {
     private Boolean defaultStrategy = false;
 
     private String description;
+
+    private String controlMode = "AUTO";
+
+    private String manualCommand;
+
+    private BigDecimal manualTargetPower;
+
+    private Integer manualDuration;
+
+    private LocalDateTime manualStartTime;
+
+    private Boolean safetyConfirmed = false;
+
+    private LocalDateTime safetyConfirmTime;
+
+    private String safetyConfirmedBy;
+
+    private String safetyConfirmNote;
 }

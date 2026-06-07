@@ -2,9 +2,11 @@ package com.ems.service.impl;
 
 import com.ems.common.exception.EmsException;
 import com.ems.domain.dto.strategy.*;
+import com.ems.domain.entity.StrategyConfig;
 import com.ems.domain.entity.StrategyExecutionLog;
 import com.ems.domain.vo.strategy.StrategyResultVO;
 import com.ems.domain.vo.strategy.StrategyStatisticsVO;
+import com.ems.repository.StrategyConfigRepository;
 import com.ems.repository.StrategyExecutionLogRepository;
 import com.ems.service.ForecastService;
 import com.ems.service.MultiObjectiveOptimizationService;
@@ -49,6 +51,7 @@ public class RealTimeStrategyServiceImpl implements RealTimeStrategyService {
     private final StrategyExecutionLogRepository executionLogRepository;
     private final ForecastService forecastService;
     private final TimeOfUsePriceService timeOfUsePriceService;
+    private final StrategyConfigRepository strategyConfigRepository;
 
     private static final BigDecimal WARNING_THRESHOLD_RATIO = new BigDecimal("0.80");
     private static final BigDecimal ALARM_THRESHOLD_RATIO = new BigDecimal("0.90");
@@ -61,8 +64,16 @@ public class RealTimeStrategyServiceImpl implements RealTimeStrategyService {
     public StrategyResultVO executeRealTimeControl(RealTimeControlRequest request) {
         log.info("执行实时策略控制 - 策略: {}, 执行类型: {}", request.getStrategyCode(), request.getExecutionType());
 
-        StrategyConfigDTO config = strategyConfigService.getByStrategyCode(request.getStrategyCode());
+        StrategyConfig config = strategyConfigRepository.findByStrategyCode(request.getStrategyCode())
+                .orElseThrow(() -> new EmsException("策略不存在, 编码: " + request.getStrategyCode()));
 
+        if ("MANUAL".equals(config.getControlMode())) {
+            StrategyResultVO manualResult = executeManualMode(request, config);
+            logExecution(manualResult, request);
+            return manualResult;
+        }
+
+        StrategyConfigDTO configDTO = strategyConfigService.getByStrategyCode(request.getStrategyCode());
         String executionType = request.getExecutionType() != null ?
                 request.getExecutionType().toUpperCase() : "MULTI_OBJECTIVE";
 
@@ -88,6 +99,69 @@ public class RealTimeStrategyServiceImpl implements RealTimeStrategyService {
         }
 
         logExecution(result, request);
+
+        return result;
+    }
+
+    private StrategyResultVO executeManualMode(RealTimeControlRequest request, StrategyConfig config) {
+        log.info("执行手动模式控制 - 策略: {}, 命令: {}", request.getStrategyCode(), config.getManualCommand());
+
+        if (config.getManualStartTime() != null && config.getManualDuration() != null) {
+            LocalDateTime endTime = config.getManualStartTime().plusSeconds(config.getManualDuration());
+            if (LocalDateTime.now().isAfter(endTime)) {
+                log.info("手动命令已超时，自动切换回自动模式 - 策略: {}", request.getStrategyCode());
+                config.setControlMode("AUTO");
+                config.setManualCommand(null);
+                config.setManualTargetPower(null);
+                config.setManualDuration(null);
+                config.setManualStartTime(null);
+                config.setSafetyConfirmed(false);
+                strategyConfigRepository.save(config);
+
+                StrategyConfigDTO configDTO = strategyConfigService.getByStrategyCode(request.getStrategyCode());
+                return executeMultiObjectiveOptimization(request);
+            }
+        }
+
+        StrategyResultVO result = new StrategyResultVO();
+        result.setStrategyCode(config.getStrategyCode());
+        result.setStrategyName(config.getStrategyName());
+        result.setStatus("success");
+
+        String manualCommand = config.getManualCommand();
+        BigDecimal targetPower = config.getManualTargetPower() != null ?
+                config.getManualTargetPower() : BigDecimal.ZERO;
+
+        switch (manualCommand) {
+            case "CHARGE":
+                result.setActionType("CHARGE");
+                result.setTargetPower(targetPower);
+                result.setUrgencyLevel("HIGH");
+                result.setMessage("手动强制充电中");
+                break;
+            case "DISCHARGE":
+                result.setActionType("DISCHARGE");
+                result.setTargetPower(targetPower);
+                result.setUrgencyLevel("HIGH");
+                result.setMessage("手动强制放电中");
+                break;
+            case "IDLE":
+            default:
+                result.setActionType("HOLD");
+                result.setTargetPower(BigDecimal.ZERO);
+                result.setUrgencyLevel("MEDIUM");
+                result.setMessage("手动强制待机中");
+                break;
+        }
+
+        List<String> actions = new ArrayList<>();
+        actions.add("手动模式: " + result.getMessage());
+        if (config.getManualDuration() != null && config.getManualStartTime() != null) {
+            LocalDateTime endTime = config.getManualStartTime().plusSeconds(config.getManualDuration());
+            long remaining = java.time.Duration.between(LocalDateTime.now(), endTime).getSeconds();
+            actions.add("剩余时间: " + remaining + " 秒");
+        }
+        result.setRecommendedActions(actions);
 
         return result;
     }
@@ -1086,5 +1160,475 @@ public class RealTimeStrategyServiceImpl implements RealTimeStrategyService {
         StrategyExecutionLogDTO dto = new StrategyExecutionLogDTO();
         BeanUtils.copyProperties(log, dto);
         return dto;
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public StrategyResultVO executeManualForceChargeDischarge(ManualForceChargeDischargeDTO request) {
+        log.info("执行手动强制充放电 - 策略: {}, 操作: {}, 功率: {} kW, 时长: {} 秒",
+                request.getStrategyCode(), request.getActionType(),
+                request.getTargetPower(), request.getDurationSeconds());
+
+        Map<String, String> safetyValidation = validateManualControlSafety(request);
+        if (!"PASSED".equals(safetyValidation.get("status"))) {
+            throw new EmsException("安全校验失败: " + safetyValidation.get("message"));
+        }
+
+        if (request.getSafetyConfirmed() == null || !request.getSafetyConfirmed()) {
+            throw new EmsException("必须确认安全后才能执行手动操作");
+        }
+
+        String actionType = request.getActionType().toUpperCase();
+        if (!"CHARGE".equals(actionType) && !"DISCHARGE".equals(actionType)) {
+            throw new EmsException("操作类型必须是 CHARGE 或 DISCHARGE");
+        }
+
+        StrategyConfig config = strategyConfigRepository.findByStrategyCode(request.getStrategyCode())
+                .orElseThrow(() -> new EmsException("策略不存在, 编码: " + request.getStrategyCode()));
+
+        BigDecimal maxRate = "CHARGE".equals(actionType) ?
+                (config.getMaxChargeRate() != null ? config.getMaxChargeRate() : new BigDecimal("0.5")) :
+                (config.getMaxDischargeRate() != null ? config.getMaxDischargeRate() : new BigDecimal("0.5"));
+        BigDecimal maxPower = DEFAULT_BATTERY_CAPACITY.multiply(maxRate);
+        if (request.getTargetPower().compareTo(maxPower) > 0) {
+            throw new EmsException("目标功率超过最大允许功率: " + maxPower.setScale(2, RoundingMode.HALF_UP) + " kW");
+        }
+
+        config.setControlMode("MANUAL");
+        config.setManualCommand(actionType);
+        config.setManualTargetPower(request.getTargetPower());
+        config.setManualDuration(request.getDurationSeconds());
+        config.setManualStartTime(LocalDateTime.now());
+        config.setSafetyConfirmed(true);
+        config.setSafetyConfirmTime(LocalDateTime.now());
+        config.setSafetyConfirmedBy(request.getOperator());
+        config.setSafetyConfirmNote(request.getSafetyConfirmNote());
+        strategyConfigRepository.save(config);
+
+        StrategyResultVO result = new StrategyResultVO();
+        result.setStrategyCode(config.getStrategyCode());
+        result.setStrategyName(config.getStrategyName());
+        result.setActionType(actionType);
+        result.setTargetPower(request.getTargetPower());
+        result.setUrgencyLevel("HIGH");
+        result.setMessage("手动强制" + ("CHARGE".equals(actionType) ? "充电" : "放电") + "已启动");
+        result.setStatus("success");
+
+        List<String> actions = new ArrayList<>();
+        actions.add("手动" + ("CHARGE".equals(actionType) ? "充电" : "放电") +
+                " " + request.getTargetPower().setScale(2, RoundingMode.HALF_UP) + " kW");
+        actions.add("持续时间: " + request.getDurationSeconds() + " 秒");
+        actions.add("操作员: " + (request.getOperator() != null ? request.getOperator() : "未知"));
+        result.setRecommendedActions(actions);
+
+        logManualExecution(result, request);
+
+        log.info("手动强制充放电执行成功 - 策略: {}, 操作: {}", request.getStrategyCode(), actionType);
+        return result;
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public StrategyResultVO executeManualStandby(ManualStandbyDTO request) {
+        log.info("执行强制待机 - 策略: {}, 时长: {} 秒",
+                request.getStrategyCode(), request.getDurationSeconds());
+
+        if (request.getSafetyConfirmed() == null || !request.getSafetyConfirmed()) {
+            throw new EmsException("必须确认安全后才能执行手动操作");
+        }
+
+        StrategyConfig config = strategyConfigRepository.findByStrategyCode(request.getStrategyCode())
+                .orElseThrow(() -> new EmsException("策略不存在, 编码: " + request.getStrategyCode()));
+
+        config.setControlMode("MANUAL");
+        config.setManualCommand("IDLE");
+        config.setManualTargetPower(BigDecimal.ZERO);
+        config.setManualDuration(request.getDurationSeconds());
+        config.setManualStartTime(LocalDateTime.now());
+        config.setSafetyConfirmed(true);
+        config.setSafetyConfirmTime(LocalDateTime.now());
+        config.setSafetyConfirmedBy(request.getOperator());
+        config.setSafetyConfirmNote(request.getSafetyConfirmNote());
+        strategyConfigRepository.save(config);
+
+        StrategyResultVO result = new StrategyResultVO();
+        result.setStrategyCode(config.getStrategyCode());
+        result.setStrategyName(config.getStrategyName());
+        result.setActionType("HOLD");
+        result.setTargetPower(BigDecimal.ZERO);
+        result.setUrgencyLevel("MEDIUM");
+        result.setMessage("强制待机已启动");
+        result.setStatus("success");
+
+        List<String> actions = new ArrayList<>();
+        actions.add("强制待机，停止充放电");
+        if (request.getDurationSeconds() != null) {
+            actions.add("持续时间: " + request.getDurationSeconds() + " 秒");
+        }
+        actions.add("操作员: " + (request.getOperator() != null ? request.getOperator() : "未知"));
+        result.setRecommendedActions(actions);
+
+        StrategyExecutionLog execLog = new StrategyExecutionLog();
+        execLog.setStrategyCode(request.getStrategyCode());
+        execLog.setExecutionTime(LocalDateTime.now());
+        execLog.setExecutionType("MANUAL_STANDBY");
+        execLog.setActionTaken("HOLD");
+        execLog.setTargetPower(BigDecimal.ZERO);
+        execLog.setActualPower(BigDecimal.ZERO);
+        execLog.setStatus("success");
+        execLog.setErrorMessage(request.getRemark());
+        execLog.setStrategyId(config.getId());
+        executionLogRepository.save(execLog);
+
+        log.info("强制待机执行成功 - 策略: {}", request.getStrategyCode());
+        return result;
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public StrategyResultVO adjustStrategyParameters(StrategyParamAdjustDTO request) {
+        log.info("调整策略参数 - 策略: {}", request.getStrategyCode());
+
+        StrategyConfig config = strategyConfigRepository.findByStrategyCode(request.getStrategyCode())
+                .orElseThrow(() -> new EmsException("策略不存在, 编码: " + request.getStrategyCode()));
+
+        List<String> changedParams = new ArrayList<>();
+
+        if (request.getMinSoc() != null) {
+            if (config.getMaxSoc() != null && request.getMinSoc().compareTo(config.getMaxSoc()) >= 0) {
+                throw new EmsException("最小SOC必须小于最大SOC");
+            }
+            config.setMinSoc(request.getMinSoc());
+            changedParams.add("minSoc: " + request.getMinSoc());
+        }
+
+        if (request.getMaxSoc() != null) {
+            if (config.getMinSoc() != null && request.getMaxSoc().compareTo(config.getMinSoc()) <= 0) {
+                throw new EmsException("最大SOC必须大于最小SOC");
+            }
+            config.setMaxSoc(request.getMaxSoc());
+            changedParams.add("maxSoc: " + request.getMaxSoc());
+        }
+
+        if (request.getDemandThresholdRatio() != null) {
+            config.setDemandThresholdRatio(request.getDemandThresholdRatio());
+            changedParams.add("demandThresholdRatio: " + request.getDemandThresholdRatio());
+        }
+
+        if (request.getArbitrageWeight() != null || request.getLifespanWeight() != null || request.getDemandWeight() != null) {
+            BigDecimal arbitrageWeight = request.getArbitrageWeight() != null ? request.getArbitrageWeight() : config.getArbitrageWeight();
+            BigDecimal lifespanWeight = request.getLifespanWeight() != null ? request.getLifespanWeight() : config.getLifespanWeight();
+            BigDecimal demandWeight = request.getDemandWeight() != null ? request.getDemandWeight() : config.getDemandWeight();
+
+            BigDecimal totalWeight = arbitrageWeight.add(lifespanWeight).add(demandWeight);
+            if (totalWeight.compareTo(BigDecimal.ZERO) <= 0) {
+                throw new EmsException("权重之和必须大于0");
+            }
+
+            if (request.getArbitrageWeight() != null) {
+                config.setArbitrageWeight(arbitrageWeight);
+                changedParams.add("arbitrageWeight: " + arbitrageWeight);
+            }
+            if (request.getLifespanWeight() != null) {
+                config.setLifespanWeight(lifespanWeight);
+                changedParams.add("lifespanWeight: " + lifespanWeight);
+            }
+            if (request.getDemandWeight() != null) {
+                config.setDemandWeight(demandWeight);
+                changedParams.add("demandWeight: " + demandWeight);
+            }
+        }
+
+        if (request.getMaxChargeRate() != null) {
+            config.setMaxChargeRate(request.getMaxChargeRate());
+            changedParams.add("maxChargeRate: " + request.getMaxChargeRate());
+        }
+
+        if (request.getMaxDischargeRate() != null) {
+            config.setMaxDischargeRate(request.getMaxDischargeRate());
+            changedParams.add("maxDischargeRate: " + request.getMaxDischargeRate());
+        }
+
+        strategyConfigRepository.save(config);
+
+        StrategyResultVO result = new StrategyResultVO();
+        result.setStrategyCode(config.getStrategyCode());
+        result.setStrategyName(config.getStrategyName());
+        result.setActionType("HOLD");
+        result.setTargetPower(BigDecimal.ZERO);
+        result.setUrgencyLevel("LOW");
+        result.setStatus("success");
+
+        if (changedParams.isEmpty()) {
+            result.setMessage("没有需要调整的参数");
+        } else {
+            result.setMessage("策略参数调整成功，已更新 " + changedParams.size() + " 个参数");
+            result.setRecommendedActions(changedParams);
+        }
+
+        StrategyExecutionLog execLog = new StrategyExecutionLog();
+        execLog.setStrategyCode(request.getStrategyCode());
+        execLog.setExecutionTime(LocalDateTime.now());
+        execLog.setExecutionType("PARAM_ADJUST");
+        execLog.setActionTaken("HOLD");
+        execLog.setTargetPower(BigDecimal.ZERO);
+        execLog.setStatus("success");
+        execLog.setErrorMessage("调整参数: " + String.join("; ", changedParams) +
+                ". 操作员: " + (request.getOperator() != null ? request.getOperator() : "未知") +
+                ". 备注: " + (request.getRemark() != null ? request.getRemark() : ""));
+        execLog.setStrategyId(config.getId());
+        executionLogRepository.save(execLog);
+
+        log.info("策略参数调整成功 - 策略: {}, 更新参数: {}", request.getStrategyCode(), changedParams.size());
+        return result;
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public Map<String, Object> switchControlMode(ModeSwitchDTO request) {
+        log.info("切换控制模式 - 策略: {}, 目标模式: {}", request.getStrategyCode(), request.getTargetMode());
+
+        Map<String, String> safetyValidation = validateModeSwitchSafety(request);
+        if (!"PASSED".equals(safetyValidation.get("status"))) {
+            throw new EmsException("安全校验失败: " + safetyValidation.get("message"));
+        }
+
+        if (request.getSafetyConfirmed() == null || !request.getSafetyConfirmed()) {
+            throw new EmsException("必须确认安全后才能切换模式");
+        }
+
+        String targetMode = request.getTargetMode().toUpperCase();
+        if (!"AUTO".equals(targetMode) && !"MANUAL".equals(targetMode)) {
+            throw new EmsException("目标模式必须是 AUTO 或 MANUAL");
+        }
+
+        StrategyConfig config = strategyConfigRepository.findByStrategyCode(request.getStrategyCode())
+                .orElseThrow(() -> new EmsException("策略不存在, 编码: " + request.getStrategyCode()));
+
+        String previousMode = config.getControlMode();
+
+        if (targetMode.equals(previousMode)) {
+            Map<String, Object> result = new HashMap<>();
+            result.put("strategyCode", config.getStrategyCode());
+            result.put("currentMode", targetMode);
+            result.put("previousMode", previousMode);
+            result.put("changed", false);
+            result.put("message", "当前已是目标模式: " + targetMode);
+            return result;
+        }
+
+        config.setControlMode(targetMode);
+        config.setSafetyConfirmed(true);
+        config.setSafetyConfirmTime(LocalDateTime.now());
+        config.setSafetyConfirmedBy(request.getOperator());
+        config.setSafetyConfirmNote(request.getSafetyConfirmNote());
+
+        if ("AUTO".equals(targetMode)) {
+            config.setManualCommand(null);
+            config.setManualTargetPower(null);
+            config.setManualDuration(null);
+            config.setManualStartTime(null);
+        }
+
+        strategyConfigRepository.save(config);
+
+        StrategyExecutionLog execLog = new StrategyExecutionLog();
+        execLog.setStrategyCode(request.getStrategyCode());
+        execLog.setExecutionTime(LocalDateTime.now());
+        execLog.setExecutionType("MODE_SWITCH");
+        execLog.setActionTaken("HOLD");
+        execLog.setTargetPower(BigDecimal.ZERO);
+        execLog.setStatus("success");
+        execLog.setErrorMessage("模式切换: " + previousMode + " -> " + targetMode +
+                ". 操作员: " + (request.getOperator() != null ? request.getOperator() : "未知") +
+                ". 备注: " + (request.getRemark() != null ? request.getRemark() : ""));
+        execLog.setStrategyId(config.getId());
+        executionLogRepository.save(execLog);
+
+        Map<String, Object> result = new HashMap<>();
+        result.put("strategyCode", config.getStrategyCode());
+        result.put("strategyName", config.getStrategyName());
+        result.put("currentMode", targetMode);
+        result.put("previousMode", previousMode);
+        result.put("changed", true);
+        result.put("message", "控制模式已切换为: " + ("AUTO".equals(targetMode) ? "自动模式" : "手动模式"));
+        result.put("switchTime", LocalDateTime.now());
+        result.put("operator", request.getOperator());
+
+        log.info("控制模式切换成功 - 策略: {}, {} -> {}", request.getStrategyCode(), previousMode, targetMode);
+        return result;
+    }
+
+    @Override
+    public Map<String, Object> getControlModeStatus(String strategyCode) {
+        StrategyConfig config = strategyConfigRepository.findByStrategyCode(strategyCode)
+                .orElseThrow(() -> new EmsException("策略不存在, 编码: " + strategyCode));
+
+        Map<String, Object> status = new HashMap<>();
+        status.put("strategyCode", config.getStrategyCode());
+        status.put("strategyName", config.getStrategyName());
+        status.put("controlMode", config.getControlMode());
+        status.put("manualCommand", config.getManualCommand());
+        status.put("manualTargetPower", config.getManualTargetPower());
+        status.put("manualDuration", config.getManualDuration());
+        status.put("manualStartTime", config.getManualStartTime());
+        status.put("safetyConfirmed", config.getSafetyConfirmed());
+        status.put("safetyConfirmTime", config.getSafetyConfirmTime());
+        status.put("safetyConfirmedBy", config.getSafetyConfirmedBy());
+        status.put("safetyConfirmNote", config.getSafetyConfirmNote());
+
+        if ("MANUAL".equals(config.getControlMode()) && config.getManualStartTime() != null && config.getManualDuration() != null) {
+            LocalDateTime endTime = config.getManualStartTime().plusSeconds(config.getManualDuration());
+            status.put("manualEndTime", endTime);
+            status.put("remainingSeconds", java.time.Duration.between(LocalDateTime.now(), endTime).getSeconds());
+        }
+
+        return status;
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void cancelManualControl(String strategyCode, String operator, String remark) {
+        log.info("取消手动控制 - 策略: {}, 操作员: {}", strategyCode, operator);
+
+        StrategyConfig config = strategyConfigRepository.findByStrategyCode(strategyCode)
+                .orElseThrow(() -> new EmsException("策略不存在, 编码: " + strategyCode));
+
+        if (!"MANUAL".equals(config.getControlMode())) {
+            throw new EmsException("当前不是手动模式，无需取消");
+        }
+
+        config.setControlMode("AUTO");
+        config.setManualCommand(null);
+        config.setManualTargetPower(null);
+        config.setManualDuration(null);
+        config.setManualStartTime(null);
+        config.setSafetyConfirmed(false);
+        strategyConfigRepository.save(config);
+
+        StrategyExecutionLog execLog = new StrategyExecutionLog();
+        execLog.setStrategyCode(strategyCode);
+        execLog.setExecutionTime(LocalDateTime.now());
+        execLog.setExecutionType("CANCEL_MANUAL");
+        execLog.setActionTaken("HOLD");
+        execLog.setTargetPower(BigDecimal.ZERO);
+        execLog.setStatus("success");
+        execLog.setErrorMessage("取消手动控制，切换回自动模式" +
+                ". 操作员: " + (operator != null ? operator : "未知") +
+                ". 备注: " + (remark != null ? remark : ""));
+        execLog.setStrategyId(config.getId());
+        executionLogRepository.save(execLog);
+
+        log.info("手动控制已取消 - 策略: {}", strategyCode);
+    }
+
+    @Override
+    public Map<String, String> validateManualControlSafety(ManualForceChargeDischargeDTO request) {
+        Map<String, String> result = new HashMap<>();
+        List<String> warnings = new ArrayList<>();
+
+        StrategyConfig config;
+        try {
+            config = strategyConfigRepository.findByStrategyCode(request.getStrategyCode()).orElse(null);
+        } catch (Exception e) {
+            result.put("status", "FAILED");
+            result.put("message", "策略不存在: " + request.getStrategyCode());
+            return result;
+        }
+
+        if (config == null) {
+            result.put("status", "FAILED");
+            result.put("message", "策略不存在: " + request.getStrategyCode());
+            return result;
+        }
+
+        if (!config.getEnabled()) {
+            result.put("status", "FAILED");
+            result.put("message", "策略未启用");
+            return result;
+        }
+
+        String actionType = request.getActionType() != null ? request.getActionType().toUpperCase() : "";
+        if ("CHARGE".equals(actionType)) {
+            BigDecimal maxSoc = config.getMaxSoc() != null ? config.getMaxSoc() : new BigDecimal("90");
+            warnings.add("充电时注意SOC上限: " + maxSoc + "%");
+        } else if ("DISCHARGE".equals(actionType)) {
+            BigDecimal minSoc = config.getMinSoc() != null ? config.getMinSoc() : new BigDecimal("20");
+            warnings.add("放电时注意SOC下限: " + minSoc + "%");
+        }
+
+        BigDecimal maxRate = "CHARGE".equals(actionType) ?
+                (config.getMaxChargeRate() != null ? config.getMaxChargeRate() : new BigDecimal("0.5")) :
+                (config.getMaxDischargeRate() != null ? config.getMaxDischargeRate() : new BigDecimal("0.5"));
+        BigDecimal maxPower = DEFAULT_BATTERY_CAPACITY.multiply(maxRate);
+        if (request.getTargetPower() != null && request.getTargetPower().compareTo(maxPower) > 0) {
+            warnings.add("目标功率超过建议值: " + maxPower.setScale(2, RoundingMode.HALF_UP) + " kW");
+        }
+
+        if (request.getDurationSeconds() != null && request.getDurationSeconds() > 7200) {
+            warnings.add("手动操作时间超过2小时，请谨慎操作");
+        }
+
+        result.put("status", "PASSED");
+        result.put("message", "安全校验通过");
+        if (!warnings.isEmpty()) {
+            result.put("warnings", String.join("; ", warnings));
+        }
+
+        return result;
+    }
+
+    @Override
+    public Map<String, String> validateModeSwitchSafety(ModeSwitchDTO request) {
+        Map<String, String> result = new HashMap<>();
+        List<String> warnings = new ArrayList<>();
+
+        StrategyConfig config;
+        try {
+            config = strategyConfigRepository.findByStrategyCode(request.getStrategyCode()).orElse(null);
+        } catch (Exception e) {
+            result.put("status", "FAILED");
+            result.put("message", "策略不存在: " + request.getStrategyCode());
+            return result;
+        }
+
+        if (config == null) {
+            result.put("status", "FAILED");
+            result.put("message", "策略不存在: " + request.getStrategyCode());
+            return result;
+        }
+
+        String targetMode = request.getTargetMode() != null ? request.getTargetMode().toUpperCase() : "";
+        if ("MANUAL".equals(targetMode) && "AUTO".equals(config.getControlMode())) {
+            warnings.add("切换到手动模式后，系统将不再自动执行策略决策");
+            warnings.add("请确保有专人监控系统运行状态");
+        } else if ("AUTO".equals(targetMode) && "MANUAL".equals(config.getControlMode())) {
+            warnings.add("切换到自动模式后，系统将恢复自动策略执行");
+            if (config.getManualCommand() != null) {
+                warnings.add("当前手动命令 " + config.getManualCommand() + " 将被取消");
+            }
+        }
+
+        result.put("status", "PASSED");
+        result.put("message", "安全校验通过");
+        if (!warnings.isEmpty()) {
+            result.put("warnings", String.join("; ", warnings));
+        }
+
+        return result;
+    }
+
+    private void logManualExecution(StrategyResultVO result, ManualForceChargeDischargeDTO request) {
+        StrategyExecutionLog log = new StrategyExecutionLog();
+        log.setStrategyCode(request.getStrategyCode());
+        log.setExecutionTime(LocalDateTime.now());
+        log.setExecutionType("MANUAL_" + request.getActionType().toUpperCase());
+        log.setActionTaken(result.getActionType());
+        log.setTargetPower(result.getTargetPower());
+        log.setActualPower(result.getTargetPower());
+        log.setStatus(result.getStatus());
+        log.setErrorMessage(request.getRemark());
+        log.setStrategyId(strategyConfigService.getByStrategyCode(request.getStrategyCode()).getId());
+        executionLogRepository.save(log);
     }
 }

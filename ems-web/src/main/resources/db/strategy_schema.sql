@@ -31,10 +31,20 @@ CREATE TABLE IF NOT EXISTS strategy_config (
     enabled BOOLEAN NOT NULL DEFAULT TRUE,
     default_strategy BOOLEAN NOT NULL DEFAULT FALSE,
     description VARCHAR(1000),
+    control_mode VARCHAR(20) NOT NULL DEFAULT 'AUTO',
+    manual_command VARCHAR(20),
+    manual_target_power DECIMAL(10,2),
+    manual_duration INT,
+    manual_start_time TIMESTAMP,
+    safety_confirmed BOOLEAN NOT NULL DEFAULT FALSE,
+    safety_confirm_time TIMESTAMP,
+    safety_confirmed_by VARCHAR(100),
+    safety_confirm_note VARCHAR(500),
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     INDEX idx_strategy_type (strategy_type),
-    INDEX idx_strategy_enabled (enabled)
+    INDEX idx_strategy_enabled (enabled),
+    INDEX idx_control_mode (control_mode)
 );
 
 -- 调度计划表
@@ -192,7 +202,8 @@ INSERT INTO strategy_config (
     peak_shaving_enabled, valley_filling_enabled, demand_control_enabled,
     schedule_interval_minutes, rolling_optimization_enabled,
     rolling_interval_minutes, look_ahead_hours, priority,
-    enabled, default_strategy, description
+    enabled, default_strategy, description,
+    control_mode, safety_confirmed
 ) VALUES (
     '综合优化策略', 'MULTI_OBJECTIVE', 'INTEGRATED_OPTIMIZATION',
     0.50, 0.30, 0.20,
@@ -200,7 +211,8 @@ INSERT INTO strategy_config (
     1.00, 70.00, 0.90,
     TRUE, TRUE, TRUE, TRUE, TRUE,
     60, TRUE, 15, 24, 5,
-    TRUE, TRUE, '默认综合优化策略，平衡套利收益、电池寿命和需量控制三个目标'
+    TRUE, TRUE, '默认综合优化策略，平衡套利收益、电池寿命和需量控制三个目标',
+    'AUTO', FALSE
 ), (
     '收益优先策略', 'ARBITRAGE_FOCUSED', 'PROFIT_FIRST',
     0.70, 0.15, 0.15,
@@ -208,7 +220,8 @@ INSERT INTO strategy_config (
     1.50, 80.00, 0.95,
     TRUE, TRUE, TRUE, TRUE, TRUE,
     60, TRUE, 15, 24, 3,
-    TRUE, FALSE, '收益优先策略，最大化峰谷套利收益，适度放宽寿命约束'
+    TRUE, FALSE, '收益优先策略，最大化峰谷套利收益，适度放宽寿命约束',
+    'AUTO', FALSE
 ), (
     '寿命优先策略', 'LIFESPAN_FOCUSED', 'LIFESPAN_FIRST',
     0.20, 0.70, 0.10,
@@ -216,7 +229,8 @@ INSERT INTO strategy_config (
     0.50, 50.00, 0.85,
     TRUE, TRUE, TRUE, TRUE, TRUE,
     60, TRUE, 15, 24, 3,
-    TRUE, FALSE, '寿命优先策略，最小化电池衰减，延长电池使用寿命'
+    TRUE, FALSE, '寿命优先策略，最小化电池衰减，延长电池使用寿命',
+    'AUTO', FALSE
 ), (
     '需量控制优先策略', 'DEMAND_FOCUSED', 'DEMAND_FIRST',
     0.15, 0.15, 0.70,
@@ -224,5 +238,6 @@ INSERT INTO strategy_config (
     1.00, 70.00, 0.80,
     TRUE, TRUE, TRUE, TRUE, TRUE,
     15, TRUE, 5, 12, 10,
-    TRUE, FALSE, '需量控制优先策略，严格控制最大需量，降低需量电费'
+    TRUE, FALSE, '需量控制优先策略，严格控制最大需量，降低需量电费',
+    'AUTO', FALSE
 );

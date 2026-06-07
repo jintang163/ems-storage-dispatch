@@ -1,7 +1,11 @@
 package com.ems.service;
 
+import com.ems.domain.dto.strategy.ManualForceChargeDischargeDTO;
+import com.ems.domain.dto.strategy.ManualStandbyDTO;
+import com.ems.domain.dto.strategy.ModeSwitchDTO;
 import com.ems.domain.dto.strategy.RealTimeControlRequest;
 import com.ems.domain.dto.strategy.StrategyExecutionLogDTO;
+import com.ems.domain.dto.strategy.StrategyParamAdjustDTO;
 import com.ems.domain.vo.strategy.StrategyResultVO;
 import com.ems.domain.vo.strategy.StrategyStatisticsVO;
 
@@ -80,4 +84,20 @@ public interface RealTimeStrategyService {
     StrategyResultVO executeMultiObjectiveOptimization(RealTimeControlRequest request);
 
     void logExecution(StrategyResultVO result, RealTimeControlRequest request);
+
+    StrategyResultVO executeManualForceChargeDischarge(ManualForceChargeDischargeDTO request);
+
+    StrategyResultVO executeManualStandby(ManualStandbyDTO request);
+
+    StrategyResultVO adjustStrategyParameters(StrategyParamAdjustDTO request);
+
+    Map<String, Object> switchControlMode(ModeSwitchDTO request);
+
+    Map<String, Object> getControlModeStatus(String strategyCode);
+
+    void cancelManualControl(String strategyCode, String operator, String remark);
+
+    Map<String, String> validateManualControlSafety(ManualForceChargeDischargeDTO request);
+
+    Map<String, String> validateModeSwitchSafety(ModeSwitchDTO request);
 }

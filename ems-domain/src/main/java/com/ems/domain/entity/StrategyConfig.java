@@ -5,6 +5,7 @@ import lombok.Data;
 import lombok.EqualsAndHashCode;
 
 import java.math.BigDecimal;
+import java.time.LocalDateTime;
 
 @Data
 @EqualsAndHashCode(callSuper = true)
@@ -101,4 +102,31 @@ public class StrategyConfig extends BaseEntity {
 
     @Column(length = 1000)
     private String description;
+
+    @Column(name = "control_mode", length = 20, nullable = false)
+    private String controlMode = "AUTO";
+
+    @Column(name = "manual_command", length = 20)
+    private String manualCommand;
+
+    @Column(name = "manual_target_power", precision = 10, scale = 2)
+    private BigDecimal manualTargetPower;
+
+    @Column(name = "manual_duration")
+    private Integer manualDuration;
+
+    @Column(name = "manual_start_time")
+    private LocalDateTime manualStartTime;
+
+    @Column(name = "safety_confirmed", nullable = false)
+    private Boolean safetyConfirmed = false;
+
+    @Column(name = "safety_confirm_time")
+    private LocalDateTime safetyConfirmTime;
+
+    @Column(name = "safety_confirmed_by", length = 100)
+    private String safetyConfirmedBy;
+
+    @Column(name = "safety_confirm_note", length = 500)
+    private String safetyConfirmNote;
 }
