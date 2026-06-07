@@ -106,4 +106,23 @@ public interface RealTimeStrategyService {
     boolean isManualModeActive(String strategyCode);
 
     void expireManualControl(String strategyCode);
+
+    Map<String, Object> checkAllAlarms(RealTimeControlRequest request);
+
+    Map<String, Object> checkBatteryOvercharge(RealTimeControlRequest request);
+
+    Map<String, Object> checkBatteryOverDischarge(RealTimeControlRequest request);
+
+    Map<String, Object> checkBatteryOverTemperature(RealTimeControlRequest request);
+
+    Map<String, Object> checkPcsCommunicationFailure(RealTimeControlRequest request);
+
+    Map<String, Object> checkLoadDataAnomaly(RealTimeControlRequest request);
+
+    Map<String, Object> checkPvDataAnomaly(RealTimeControlRequest request);
+
+    StrategyResultVO executeSafetyInterlock(RealTimeControlRequest request, Map<String, Object> alarmResult);
+
+    Map<String, Object> buildAlarmResult(String alarmType, boolean triggered, String severity,
+                                          String message, BigDecimal currentValue, BigDecimal threshold);
 }

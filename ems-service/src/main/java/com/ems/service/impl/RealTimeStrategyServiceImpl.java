@@ -1,14 +1,21 @@
 package com.ems.service.impl;
 
+import com.ems.common.constants.EmsConstants;
+import com.ems.common.enums.AlarmSeverityEnum;
 import com.ems.common.exception.EmsException;
 import com.ems.domain.dto.strategy.*;
+import com.ems.domain.entity.AlarmRecord;
 import com.ems.domain.entity.Device;
 import com.ems.domain.entity.DispatchCommand;
 import com.ems.domain.entity.StrategyConfig;
 import com.ems.domain.entity.StrategyExecutionLog;
+import com.ems.domain.tsdb.BmsData;
+import com.ems.domain.tsdb.PcsData;
 import com.ems.domain.vo.strategy.StrategyResultVO;
 import com.ems.domain.vo.strategy.StrategyStatisticsVO;
+import com.ems.influxdb.service.RealtimeDataCache;
 import com.ems.mqtt.service.MqttPublisherService;
+import com.ems.repository.AlarmRecordRepository;
 import com.ems.repository.DeviceRepository;
 import com.ems.repository.DispatchCommandRepository;
 import com.ems.repository.StrategyConfigRepository;
@@ -27,6 +34,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
@@ -60,6 +68,8 @@ public class RealTimeStrategyServiceImpl implements RealTimeStrategyService {
     private final MqttPublisherService mqttPublisherService;
     private final DispatchCommandRepository dispatchCommandRepository;
     private final DeviceRepository deviceRepository;
+    private final AlarmRecordRepository alarmRecordRepository;
+    private final RealtimeDataCache realtimeDataCache;
 
     private static final BigDecimal WARNING_THRESHOLD_RATIO = new BigDecimal("0.80");
     private static final BigDecimal ALARM_THRESHOLD_RATIO = new BigDecimal("0.90");
@@ -67,10 +77,36 @@ public class RealTimeStrategyServiceImpl implements RealTimeStrategyService {
     private static final BigDecimal DEFAULT_DEMAND_PRICE = new BigDecimal("35");
     private static final BigDecimal DEFAULT_BATTERY_COST = new BigDecimal("1500");
 
+    private static final String ALARM_TYPE_BATTERY_OVERCHARGE = "BATTERY_OVERCHARGE";
+    private static final String ALARM_TYPE_BATTERY_OVERDISCHARGE = "BATTERY_OVERDISCHARGE";
+    private static final String ALARM_TYPE_BATTERY_OVERTEMP = "BATTERY_OVERTEMP";
+    private static final String ALARM_TYPE_PCS_COMM_FAILURE = "PCS_COMM_FAILURE";
+    private static final String ALARM_TYPE_LOAD_DATA_ANOMALY = "LOAD_DATA_ANOMALY";
+    private static final String ALARM_TYPE_PV_DATA_ANOMALY = "PV_DATA_ANOMALY";
+
+    private static final BigDecimal DEFAULT_BATTERY_OVERTEMP_THRESHOLD = new BigDecimal("55");
+    private static final BigDecimal DEFAULT_LOAD_SUDDEN_CHANGE_THRESHOLD = new BigDecimal("50");
+    private static final BigDecimal DEFAULT_PV_SUDDEN_CHANGE_THRESHOLD = new BigDecimal("30");
+    private static final int DEFAULT_DATA_TIMEOUT_SECONDS = 300;
+
     @Override
     @Transactional(rollbackFor = Exception.class)
     public StrategyResultVO executeRealTimeControl(RealTimeControlRequest request) {
         log.info("执行实时策略控制 - 策略: {}, 执行类型: {}", request.getStrategyCode(), request.getExecutionType());
+
+        Map<String, Object> alarmResult = checkAllAlarms(request);
+        boolean hasTriggeredAlarm = (Boolean) alarmResult.getOrDefault("hasTriggeredAlarm", false);
+        boolean hasCriticalAlarm = (Boolean) alarmResult.getOrDefault("hasCriticalAlarm", false);
+        boolean hasErrorAlarm = (Boolean) alarmResult.getOrDefault("hasErrorAlarm", false);
+
+        if (hasTriggeredAlarm && (hasCriticalAlarm || hasErrorAlarm) &&
+                request.getSafetyInterlockEnabled() != null && request.getSafetyInterlockEnabled()) {
+            log.warn("检测到严重/错误告警，触发安全联锁 - 策略: {}, 告警: {}",
+                    request.getStrategyCode(), alarmResult.get("triggeredAlarmTypes"));
+            StrategyResultVO interlockResult = executeSafetyInterlock(request, alarmResult);
+            logExecution(interlockResult, request);
+            return interlockResult;
+        }
 
         Map<String, Object> guardResult = checkManualModeGuard(request.getStrategyCode());
         boolean isManualMode = (Boolean) guardResult.getOrDefault("isManualMode", false);
@@ -81,6 +117,13 @@ public class RealTimeStrategyServiceImpl implements RealTimeStrategyService {
             StrategyConfig config = strategyConfigRepository.findByStrategyCode(request.getStrategyCode())
                     .orElseThrow(() -> new EmsException("策略不存在, 编码: " + request.getStrategyCode()));
             StrategyResultVO manualResult = executeManualMode(request, config);
+
+            if (manualResult.getAdditionalInfo() == null) {
+                manualResult.setAdditionalInfo(new HashMap<>());
+            }
+            manualResult.getAdditionalInfo().put("alarmCheckResult", alarmResult);
+            manualResult.getAdditionalInfo().put("hasAlarm", hasTriggeredAlarm);
+
             logExecution(manualResult, request);
             return manualResult;
         }
@@ -121,6 +164,12 @@ public class RealTimeStrategyServiceImpl implements RealTimeStrategyService {
         }
 
         logExecution(result, request);
+
+        if (result.getAdditionalInfo() == null) {
+            result.setAdditionalInfo(new HashMap<>());
+        }
+        result.getAdditionalInfo().put("alarmCheckResult", alarmResult);
+        result.getAdditionalInfo().put("hasAlarm", hasTriggeredAlarm);
 
         return result;
     }
@@ -954,6 +1003,18 @@ public class RealTimeStrategyServiceImpl implements RealTimeStrategyService {
     public StrategyResultVO executeMultiObjectiveOptimization(RealTimeControlRequest request) {
         log.info("执行多目标优化 - 策略: {}", request.getStrategyCode());
 
+        Map<String, Object> alarmResult = checkAllAlarms(request);
+        boolean hasTriggeredAlarm = (Boolean) alarmResult.getOrDefault("hasTriggeredAlarm", false);
+        boolean hasCriticalAlarm = (Boolean) alarmResult.getOrDefault("hasCriticalAlarm", false);
+        boolean hasErrorAlarm = (Boolean) alarmResult.getOrDefault("hasErrorAlarm", false);
+
+        if (hasTriggeredAlarm && (hasCriticalAlarm || hasErrorAlarm) &&
+                request.getSafetyInterlockEnabled() != null && request.getSafetyInterlockEnabled()) {
+            log.warn("检测到严重/错误告警，触发安全联锁 - 策略: {}, 告警: {}",
+                    request.getStrategyCode(), alarmResult.get("triggeredAlarmTypes"));
+            return executeSafetyInterlock(request, alarmResult);
+        }
+
         StrategyConfigDTO config = strategyConfigService.getByStrategyCode(request.getStrategyCode());
         StrategyResultVO result = optimizationService.optimize(request, config);
 
@@ -965,9 +1026,20 @@ public class RealTimeStrategyServiceImpl implements RealTimeStrategyService {
             if (demandResult.getActionType().equals("DISCHARGE")
                     && demandResult.getTargetPower().compareTo(BigDecimal.ZERO) > 0) {
                 log.info("需量告警优先级最高，覆盖多目标优化结果");
+                if (demandResult.getAdditionalInfo() == null) {
+                    demandResult.setAdditionalInfo(new HashMap<>());
+                }
+                demandResult.getAdditionalInfo().put("alarmCheckResult", alarmResult);
+                demandResult.getAdditionalInfo().put("hasAlarm", hasTriggeredAlarm);
                 return demandResult;
             }
         }
+
+        if (result.getAdditionalInfo() == null) {
+            result.setAdditionalInfo(new HashMap<>());
+        }
+        result.getAdditionalInfo().put("alarmCheckResult", alarmResult);
+        result.getAdditionalInfo().put("hasAlarm", hasTriggeredAlarm);
 
         return result;
     }
@@ -1884,5 +1956,527 @@ public class RealTimeStrategyServiceImpl implements RealTimeStrategyService {
         executionLogRepository.save(execLog);
 
         log.info("手动控制超时恢复完成 - 策略: {}", config.getStrategyCode());
+    }
+
+    @Override
+    public Map<String, Object> buildAlarmResult(String alarmType, boolean triggered, String severity,
+                                                 String message, BigDecimal currentValue, BigDecimal threshold) {
+        Map<String, Object> result = new HashMap<>();
+        result.put("alarmType", alarmType);
+        result.put("triggered", triggered);
+        result.put("severity", severity);
+        result.put("message", message);
+        result.put("currentValue", currentValue);
+        result.put("threshold", threshold);
+        result.put("alarmTime", LocalDateTime.now());
+        return result;
+    }
+
+    private void createAlarmRecord(String alarmType, String severity, String message,
+                                   BigDecimal pointValue, String deviceSn) {
+        try {
+            Device device = deviceRepository.findByDeviceSn(deviceSn).orElse(null);
+            Long deviceId = device != null ? device.getId() : null;
+
+            List<AlarmRecord> existingActive = deviceId != null ?
+                    alarmRecordRepository.findByStatusAndDeviceIdAndPointId(
+                            EmsConstants.ALARM_STATUS_ACTIVE, deviceId, null) :
+                    Collections.emptyList();
+
+            boolean alreadyActive = existingActive.stream()
+                    .anyMatch(a -> alarmType.equals(a.getAlarmType()));
+
+            if (alreadyActive) {
+                log.debug("告警已存在，跳过重复创建: {}, 设备: {}", alarmType, deviceSn);
+                return;
+            }
+
+            AlarmRecord alarm = new AlarmRecord();
+            alarm.setDeviceId(deviceId);
+            alarm.setAlarmType(alarmType);
+            alarm.setSeverity(severity);
+            alarm.setMessage(message);
+            alarm.setPointValue(pointValue);
+            alarm.setAlarmTime(LocalDateTime.now());
+            alarm.setStatus(EmsConstants.ALARM_STATUS_ACTIVE);
+            alarmRecordRepository.save(alarm);
+
+            log.warn("告警已创建 - 类型: {}, 级别: {}, 设备: {}, 消息: {}", alarmType, severity, deviceSn, message);
+        } catch (Exception e) {
+            log.error("创建告警记录失败 - 类型: {}, 设备: {}", alarmType, deviceSn, e);
+        }
+    }
+
+    private void clearActiveAlarm(String alarmType, String deviceSn) {
+        try {
+            Device device = deviceRepository.findByDeviceSn(deviceSn).orElse(null);
+            if (device == null) {
+                return;
+            }
+
+            List<AlarmRecord> activeAlarms = alarmRecordRepository.findByStatusAndDeviceIdAndPointId(
+                    EmsConstants.ALARM_STATUS_ACTIVE, device.getId(), null);
+
+            for (AlarmRecord alarm : activeAlarms) {
+                if (alarmType.equals(alarm.getAlarmType())) {
+                    alarm.setStatus(EmsConstants.ALARM_STATUS_CLEARED);
+                    alarm.setClearTime(LocalDateTime.now());
+                    alarm.setClearedBy("system");
+                    alarmRecordRepository.save(alarm);
+                    log.info("告警已自动清除 - 类型: {}, 设备: {}", alarmType, deviceSn);
+                }
+            }
+        } catch (Exception e) {
+            log.error("清除告警失败 - 类型: {}, 设备: {}", alarmType, deviceSn, e);
+        }
+    }
+
+    @Override
+    public Map<String, Object> checkBatteryOvercharge(RealTimeControlRequest request) {
+        StrategyConfigDTO config = strategyConfigService.getByStrategyCode(request.getStrategyCode());
+        BigDecimal maxSoc = config.getMaxSoc() != null ? config.getMaxSoc() : new BigDecimal("90");
+        BigDecimal currentSoc = request.getCurrentSoc() != null ? request.getCurrentSoc() : new BigDecimal("50");
+
+        BigDecimal pcsPower = request.getPcsActivePower();
+        if (pcsPower == null && request.getBatterySn() != null) {
+            BmsData bmsData = realtimeDataCache.getBmsData(request.getBatterySn());
+            if (bmsData != null && bmsData.getTotalCurrent() != null) {
+                pcsPower = BigDecimal.valueOf(bmsData.getTotalCurrent() < 0 ?
+                        Math.abs(bmsData.getTotalCurrent()) : 0);
+            }
+        }
+        if (pcsPower == null) {
+            pcsPower = BigDecimal.ZERO;
+        }
+
+        boolean isCharging = pcsPower.compareTo(BigDecimal.ZERO) < 0;
+
+        boolean triggered = currentSoc.compareTo(maxSoc) >= 0 && isCharging;
+
+        String severity = triggered ? AlarmSeverityEnum.CRITICAL.getCode() : AlarmSeverityEnum.INFO.getCode();
+        String message = triggered ?
+                String.format("电池过充告警：SOC %.2f%% 超过上限 %.2f%%，且仍在充电中，功率 %.2f kW",
+                        currentSoc, maxSoc, pcsPower.abs()) :
+                String.format("电池SOC正常：%.2f%%，上限 %.2f%%", currentSoc, maxSoc);
+
+        Map<String, Object> result = buildAlarmResult(ALARM_TYPE_BATTERY_OVERCHARGE, triggered, severity,
+                message, currentSoc, maxSoc);
+
+        String deviceSn = request.getBatterySn() != null ? request.getBatterySn() : request.getStrategyCode();
+        if (triggered && request.getAlarmEnabled() != null && request.getAlarmEnabled()) {
+            createAlarmRecord(ALARM_TYPE_BATTERY_OVERCHARGE, severity, message, currentSoc, deviceSn);
+        } else if (!triggered) {
+            clearActiveAlarm(ALARM_TYPE_BATTERY_OVERCHARGE, deviceSn);
+        }
+
+        return result;
+    }
+
+    @Override
+    public Map<String, Object> checkBatteryOverDischarge(RealTimeControlRequest request) {
+        StrategyConfigDTO config = strategyConfigService.getByStrategyCode(request.getStrategyCode());
+        BigDecimal minSoc = config.getMinSoc() != null ? config.getMinSoc() : new BigDecimal("20");
+        BigDecimal currentSoc = request.getCurrentSoc() != null ? request.getCurrentSoc() : new BigDecimal("50");
+
+        boolean triggered = currentSoc.compareTo(minSoc) <= 0;
+
+        String severity = triggered ? AlarmSeverityEnum.CRITICAL.getCode() : AlarmSeverityEnum.INFO.getCode();
+        String message = triggered ?
+                String.format("电池过放告警：SOC %.2f%% 低于下限 %.2f%%", currentSoc, minSoc) :
+                String.format("电池SOC正常：%.2f%%，下限 %.2f%%", currentSoc, minSoc);
+
+        Map<String, Object> result = buildAlarmResult(ALARM_TYPE_BATTERY_OVERDISCHARGE, triggered, severity,
+                message, currentSoc, minSoc);
+
+        String deviceSn = request.getBatterySn() != null ? request.getBatterySn() : request.getStrategyCode();
+        if (triggered && request.getAlarmEnabled() != null && request.getAlarmEnabled()) {
+            createAlarmRecord(ALARM_TYPE_BATTERY_OVERDISCHARGE, severity, message, currentSoc, deviceSn);
+        } else if (!triggered) {
+            clearActiveAlarm(ALARM_TYPE_BATTERY_OVERDISCHARGE, deviceSn);
+        }
+
+        return result;
+    }
+
+    @Override
+    public Map<String, Object> checkBatteryOverTemperature(RealTimeControlRequest request) {
+        BigDecimal threshold = request.getBatteryOverTempThreshold() != null ?
+                request.getBatteryOverTempThreshold() : DEFAULT_BATTERY_OVERTEMP_THRESHOLD;
+
+        BigDecimal currentTemp = request.getBatteryTemperature();
+        if (currentTemp == null && request.getBatterySn() != null) {
+            BmsData bmsData = realtimeDataCache.getBmsData(request.getBatterySn());
+            if (bmsData != null && bmsData.getMaxTemperature() != null) {
+                currentTemp = BigDecimal.valueOf(bmsData.getMaxTemperature());
+            }
+        }
+        if (currentTemp == null) {
+            currentTemp = BigDecimal.ZERO;
+        }
+
+        boolean triggered = currentTemp.compareTo(threshold) >= 0;
+
+        String severity = triggered ? AlarmSeverityEnum.ERROR.getCode() : AlarmSeverityEnum.INFO.getCode();
+        String message = triggered ?
+                String.format("电池过温告警：最高温度 %.2f°C 超过阈值 %.2f°C", currentTemp, threshold) :
+                String.format("电池温度正常：%.2f°C，阈值 %.2f°C", currentTemp, threshold);
+
+        Map<String, Object> result = buildAlarmResult(ALARM_TYPE_BATTERY_OVERTEMP, triggered, severity,
+                message, currentTemp, threshold);
+
+        String deviceSn = request.getBatterySn() != null ? request.getBatterySn() : request.getStrategyCode();
+        if (triggered && request.getAlarmEnabled() != null && request.getAlarmEnabled()) {
+            createAlarmRecord(ALARM_TYPE_BATTERY_OVERTEMP, severity, message, currentTemp, deviceSn);
+        } else if (!triggered) {
+            clearActiveAlarm(ALARM_TYPE_BATTERY_OVERTEMP, deviceSn);
+        }
+
+        return result;
+    }
+
+    @Override
+    public Map<String, Object> checkPcsCommunicationFailure(RealTimeControlRequest request) {
+        String pcsSn = request.getPcsSn();
+        if (pcsSn == null || pcsSn.isEmpty()) {
+            return buildAlarmResult(ALARM_TYPE_PCS_COMM_FAILURE, false, AlarmSeverityEnum.INFO.getCode(),
+                    "未配置PCS设备编号，跳过检测", BigDecimal.ZERO, BigDecimal.ZERO);
+        }
+
+        int timeoutSeconds = request.getDataTimeoutSeconds() != null ?
+                request.getDataTimeoutSeconds() : DEFAULT_DATA_TIMEOUT_SECONDS;
+
+        Instant lastDataTime = request.getPcsLastDataTime();
+        if (lastDataTime == null) {
+            PcsData pcsData = realtimeDataCache.getPcsData(pcsSn);
+            if (pcsData != null && pcsData.getTimestamp() != null) {
+                lastDataTime = pcsData.getTimestamp();
+            }
+        }
+
+        boolean triggered = false;
+        BigDecimal secondsSinceLastData = BigDecimal.ZERO;
+        if (lastDataTime != null) {
+            long seconds = java.time.Duration.between(lastDataTime, Instant.now()).getSeconds();
+            secondsSinceLastData = BigDecimal.valueOf(seconds);
+            triggered = seconds > timeoutSeconds;
+        } else {
+            triggered = true;
+            secondsSinceLastData = new BigDecimal("-1");
+        }
+
+        if (request.getPcsOnline() != null) {
+            triggered = triggered || !request.getPcsOnline();
+        }
+
+        BigDecimal threshold = BigDecimal.valueOf(timeoutSeconds);
+        String severity = triggered ? AlarmSeverityEnum.ERROR.getCode() : AlarmSeverityEnum.INFO.getCode();
+        String message = triggered ?
+                String.format("PCS通信中断告警：设备 %s 已 %d 秒无数据更新",
+                        pcsSn, secondsSinceLastData.intValue()) :
+                String.format("PCS通信正常：设备 %s，最新数据 %d 秒前",
+                        pcsSn, secondsSinceLastData.intValue());
+
+        Map<String, Object> result = buildAlarmResult(ALARM_TYPE_PCS_COMM_FAILURE, triggered, severity,
+                message, secondsSinceLastData, threshold);
+
+        if (triggered && request.getAlarmEnabled() != null && request.getAlarmEnabled()) {
+            createAlarmRecord(ALARM_TYPE_PCS_COMM_FAILURE, severity, message, secondsSinceLastData, pcsSn);
+        } else if (!triggered) {
+            clearActiveAlarm(ALARM_TYPE_PCS_COMM_FAILURE, pcsSn);
+        }
+
+        return result;
+    }
+
+    @Override
+    public Map<String, Object> checkLoadDataAnomaly(RealTimeControlRequest request) {
+        String meterSn = request.getMeterSn();
+        if (meterSn == null || meterSn.isEmpty()) {
+            return buildAlarmResult(ALARM_TYPE_LOAD_DATA_ANOMALY, false, AlarmSeverityEnum.INFO.getCode(),
+                    "未配置电表设备编号，跳过负荷数据检测", BigDecimal.ZERO, BigDecimal.ZERO);
+        }
+
+        int timeoutSeconds = request.getDataTimeoutSeconds() != null ?
+                request.getDataTimeoutSeconds() : DEFAULT_DATA_TIMEOUT_SECONDS;
+        BigDecimal suddenChangeThreshold = request.getLoadSuddenChangeThreshold() != null ?
+                request.getLoadSuddenChangeThreshold() : DEFAULT_LOAD_SUDDEN_CHANGE_THRESHOLD;
+
+        Instant lastDataTime = request.getLoadLastDataTime();
+        BigDecimal currentLoad = request.getCurrentLoad() != null ? request.getCurrentLoad() : BigDecimal.ZERO;
+        BigDecimal previousLoad = request.getPreviousLoad();
+
+        boolean dataTimeout = false;
+        boolean suddenChange = false;
+        BigDecimal secondsSinceLastData = BigDecimal.ZERO;
+        BigDecimal changeAmount = BigDecimal.ZERO;
+
+        if (lastDataTime != null) {
+            long seconds = java.time.Duration.between(lastDataTime, Instant.now()).getSeconds();
+            secondsSinceLastData = BigDecimal.valueOf(seconds);
+            dataTimeout = seconds > timeoutSeconds;
+        } else {
+            dataTimeout = true;
+            secondsSinceLastData = new BigDecimal("-1");
+        }
+
+        if (previousLoad != null && previousLoad.compareTo(BigDecimal.ZERO) > 0) {
+            changeAmount = currentLoad.subtract(previousLoad).abs();
+            double changeRatio = changeAmount.divide(previousLoad, 4, RoundingMode.HALF_UP).doubleValue();
+            suddenChange = changeRatio > 0.5 && changeAmount.compareTo(suddenChangeThreshold) > 0;
+        }
+
+        boolean triggered = dataTimeout || suddenChange;
+
+        String severity;
+        String message;
+        if (triggered) {
+            severity = dataTimeout ? AlarmSeverityEnum.ERROR.getCode() : AlarmSeverityEnum.WARNING.getCode();
+            if (dataTimeout) {
+                message = String.format("负荷数据断线告警：电表 %s 已 %d 秒无数据更新",
+                        meterSn, secondsSinceLastData.intValue());
+            } else {
+                message = String.format("负荷数据突变告警：当前负荷 %.2f kW，上一时刻 %.2f kW，突变 %.2f kW，超过阈值 %.2f kW",
+                        currentLoad, previousLoad, changeAmount, suddenChangeThreshold);
+            }
+        } else {
+            severity = AlarmSeverityEnum.INFO.getCode();
+            message = String.format("负荷数据正常：%.2f kW，最新数据 %d 秒前",
+                    currentLoad, secondsSinceLastData.intValue());
+        }
+
+        Map<String, Object> result = buildAlarmResult(ALARM_TYPE_LOAD_DATA_ANOMALY, triggered, severity,
+                message, currentLoad, suddenChangeThreshold);
+        result.put("dataTimeout", dataTimeout);
+        result.put("suddenChange", suddenChange);
+        result.put("changeAmount", changeAmount);
+
+        if (triggered && request.getAlarmEnabled() != null && request.getAlarmEnabled()) {
+            createAlarmRecord(ALARM_TYPE_LOAD_DATA_ANOMALY, severity, message, currentLoad, meterSn);
+        } else if (!triggered) {
+            clearActiveAlarm(ALARM_TYPE_LOAD_DATA_ANOMALY, meterSn);
+        }
+
+        return result;
+    }
+
+    @Override
+    public Map<String, Object> checkPvDataAnomaly(RealTimeControlRequest request) {
+        String pvSn = request.getPvSn();
+        if (pvSn == null || pvSn.isEmpty()) {
+            return buildAlarmResult(ALARM_TYPE_PV_DATA_ANOMALY, false, AlarmSeverityEnum.INFO.getCode(),
+                    "未配置光伏设备编号，跳过光伏数据检测", BigDecimal.ZERO, BigDecimal.ZERO);
+        }
+
+        int timeoutSeconds = request.getDataTimeoutSeconds() != null ?
+                request.getDataTimeoutSeconds() : DEFAULT_DATA_TIMEOUT_SECONDS;
+        BigDecimal suddenChangeThreshold = request.getPvSuddenChangeThreshold() != null ?
+                request.getPvSuddenChangeThreshold() : DEFAULT_PV_SUDDEN_CHANGE_THRESHOLD;
+
+        Instant lastDataTime = request.getPvLastDataTime();
+        BigDecimal currentPv = request.getCurrentPv() != null ? request.getCurrentPv() : BigDecimal.ZERO;
+        BigDecimal previousPv = request.getPreviousPv();
+
+        boolean dataTimeout = false;
+        boolean suddenChange = false;
+        BigDecimal secondsSinceLastData = BigDecimal.ZERO;
+        BigDecimal changeAmount = BigDecimal.ZERO;
+
+        if (lastDataTime != null) {
+            long seconds = java.time.Duration.between(lastDataTime, Instant.now()).getSeconds();
+            secondsSinceLastData = BigDecimal.valueOf(seconds);
+            dataTimeout = seconds > timeoutSeconds;
+        } else {
+            dataTimeout = true;
+            secondsSinceLastData = new BigDecimal("-1");
+        }
+
+        if (previousPv != null && previousPv.compareTo(BigDecimal.ZERO) > 0) {
+            changeAmount = currentPv.subtract(previousPv).abs();
+            double changeRatio = changeAmount.divide(previousPv, 4, RoundingMode.HALF_UP).doubleValue();
+            suddenChange = changeRatio > 0.5 && changeAmount.compareTo(suddenChangeThreshold) > 0;
+        }
+
+        boolean triggered = dataTimeout || suddenChange;
+
+        String severity;
+        String message;
+        if (triggered) {
+            severity = dataTimeout ? AlarmSeverityEnum.ERROR.getCode() : AlarmSeverityEnum.WARNING.getCode();
+            if (dataTimeout) {
+                message = String.format("光伏数据断线告警：设备 %s 已 %d 秒无数据更新",
+                        pvSn, secondsSinceLastData.intValue());
+            } else {
+                message = String.format("光伏数据突变告警：当前功率 %.2f kW，上一时刻 %.2f kW，突变 %.2f kW，超过阈值 %.2f kW",
+                        currentPv, previousPv, changeAmount, suddenChangeThreshold);
+            }
+        } else {
+            severity = AlarmSeverityEnum.INFO.getCode();
+            message = String.format("光伏数据正常：%.2f kW，最新数据 %d 秒前",
+                    currentPv, secondsSinceLastData.intValue());
+        }
+
+        Map<String, Object> result = buildAlarmResult(ALARM_TYPE_PV_DATA_ANOMALY, triggered, severity,
+                message, currentPv, suddenChangeThreshold);
+        result.put("dataTimeout", dataTimeout);
+        result.put("suddenChange", suddenChange);
+        result.put("changeAmount", changeAmount);
+
+        if (triggered && request.getAlarmEnabled() != null && request.getAlarmEnabled()) {
+            createAlarmRecord(ALARM_TYPE_PV_DATA_ANOMALY, severity, message, currentPv, pvSn);
+        } else if (!triggered) {
+            clearActiveAlarm(ALARM_TYPE_PV_DATA_ANOMALY, pvSn);
+        }
+
+        return result;
+    }
+
+    @Override
+    public Map<String, Object> checkAllAlarms(RealTimeControlRequest request) {
+        Map<String, Object> allAlarms = new LinkedHashMap<>();
+
+        Map<String, Object> overcharge = checkBatteryOvercharge(request);
+        allAlarms.put(ALARM_TYPE_BATTERY_OVERCHARGE, overcharge);
+
+        Map<String, Object> overdischarge = checkBatteryOverDischarge(request);
+        allAlarms.put(ALARM_TYPE_BATTERY_OVERDISCHARGE, overdischarge);
+
+        Map<String, Object> overtemp = checkBatteryOverTemperature(request);
+        allAlarms.put(ALARM_TYPE_BATTERY_OVERTEMP, overtemp);
+
+        Map<String, Object> pcsComm = checkPcsCommunicationFailure(request);
+        allAlarms.put(ALARM_TYPE_PCS_COMM_FAILURE, pcsComm);
+
+        Map<String, Object> loadAnomaly = checkLoadDataAnomaly(request);
+        allAlarms.put(ALARM_TYPE_LOAD_DATA_ANOMALY, loadAnomaly);
+
+        Map<String, Object> pvAnomaly = checkPvDataAnomaly(request);
+        allAlarms.put(ALARM_TYPE_PV_DATA_ANOMALY, pvAnomaly);
+
+        boolean hasCriticalAlarm = false;
+        boolean hasErrorAlarm = false;
+        boolean hasWarningAlarm = false;
+        List<String> triggeredAlarmTypes = new ArrayList<>();
+        List<String> alarmMessages = new ArrayList<>();
+
+        for (Map.Entry<String, Object> entry : allAlarms.entrySet()) {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> alarm = (Map<String, Object>) entry.getValue();
+            boolean triggered = (Boolean) alarm.getOrDefault("triggered", false);
+            if (triggered) {
+                triggeredAlarmTypes.add(entry.getKey());
+                alarmMessages.add((String) alarm.getOrDefault("message", ""));
+                String severity = (String) alarm.getOrDefault("severity", "");
+                if (AlarmSeverityEnum.CRITICAL.getCode().equals(severity)) {
+                    hasCriticalAlarm = true;
+                } else if (AlarmSeverityEnum.ERROR.getCode().equals(severity)) {
+                    hasErrorAlarm = true;
+                } else if (AlarmSeverityEnum.WARNING.getCode().equals(severity)) {
+                    hasWarningAlarm = true;
+                }
+            }
+        }
+
+        allAlarms.put("hasTriggeredAlarm", !triggeredAlarmTypes.isEmpty());
+        allAlarms.put("hasCriticalAlarm", hasCriticalAlarm);
+        allAlarms.put("hasErrorAlarm", hasErrorAlarm);
+        allAlarms.put("hasWarningAlarm", hasWarningAlarm);
+        allAlarms.put("triggeredAlarmTypes", triggeredAlarmTypes);
+        allAlarms.put("alarmMessages", alarmMessages);
+        allAlarms.put("checkTime", LocalDateTime.now());
+
+        return allAlarms;
+    }
+
+    @Override
+    public StrategyResultVO executeSafetyInterlock(RealTimeControlRequest request, Map<String, Object> alarmResult) {
+        log.info("执行安全联锁 - 策略: {}, 告警数量: {}",
+                request.getStrategyCode(),
+                ((List<?>) alarmResult.getOrDefault("triggeredAlarmTypes", Collections.emptyList())).size());
+
+        StrategyConfigDTO config = strategyConfigService.getByStrategyCode(request.getStrategyCode());
+        String batterySn = config.getBatterySn();
+
+        StrategyResultVO result = new StrategyResultVO();
+        result.setStrategyCode(config.getStrategyCode());
+        result.setStrategyName(config.getStrategyName());
+        result.setActionType("HOLD");
+        result.setTargetPower(BigDecimal.ZERO);
+        result.setStatus("success");
+        result.setUrgencyLevel("CRITICAL");
+
+        @SuppressWarnings("unchecked")
+        List<String> triggeredAlarms = (List<String>) alarmResult.getOrDefault("triggeredAlarmTypes",
+                Collections.emptyList());
+        @SuppressWarnings("unchecked")
+        List<String> alarmMessages = (List<String>) alarmResult.getOrDefault("alarmMessages",
+                Collections.emptyList());
+
+        boolean hasCritical = (Boolean) alarmResult.getOrDefault("hasCriticalAlarm", false);
+        boolean hasError = (Boolean) alarmResult.getOrDefault("hasErrorAlarm", false);
+
+        String interlockReason;
+        if (hasCritical) {
+            interlockReason = "严重告警触发安全联锁";
+            result.setMessage(interlockReason + "，已强制停止充放电并切换到待机状态");
+        } else if (hasError) {
+            interlockReason = "错误告警触发安全联锁";
+            result.setMessage(interlockReason + "，已停止充放电并切换到待机状态");
+        } else {
+            interlockReason = "告警触发安全联锁";
+            result.setMessage(interlockReason + "，已暂停充放电");
+        }
+
+        List<String> actions = new ArrayList<>();
+        actions.add("安全联锁已启动：" + interlockReason);
+        actions.add("触发告警：" + String.join("; ", triggeredAlarms));
+        actions.add("告警详情：");
+        for (String msg : alarmMessages) {
+            actions.add("  - " + msg);
+        }
+        actions.add("控制动作：停止充放电，切换到待机模式");
+
+        if (batterySn != null && !batterySn.isEmpty() &&
+                request.getSafetyInterlockEnabled() != null && request.getSafetyInterlockEnabled()) {
+            Device device = deviceRepository.findByDeviceSn(batterySn).orElse(null);
+            if (device != null) {
+                DispatchCommand dispatchCommand = new DispatchCommand();
+                dispatchCommand.setCommandType("STOP");
+                dispatchCommand.setDeviceId(device.getId());
+                dispatchCommand.setTargetPower(BigDecimal.ZERO);
+                dispatchCommand.setPriority(0);
+                dispatchCommand.setStatus("pending");
+                dispatchCommand.setCreatedBy("safety_interlock");
+                dispatchCommand = dispatchCommandRepository.save(dispatchCommand);
+
+                try {
+                    mqttPublisherService.sendStop(batterySn);
+                    dispatchCommand.setStatus("sent");
+                    dispatchCommand.setSentTime(LocalDateTime.now());
+                    dispatchCommand.setResultMessage("安全联锁触发，停止命令已通过MQTT发送");
+                    dispatchCommandRepository.save(dispatchCommand);
+                    actions.add("已下发停止命令到设备: " + batterySn);
+                    actions.add("调度命令ID: " + dispatchCommand.getId());
+                    log.info("安全联锁停止命令已发送 - 设备: {}, 触发告警: {}", batterySn, triggeredAlarms);
+                } catch (Exception e) {
+                    log.error("安全联锁停止命令发送失败 - 设备: {}", batterySn, e);
+                    dispatchCommand.setStatus("failed");
+                    dispatchCommand.setResultMessage("MQTT发送失败: " + e.getMessage());
+                    dispatchCommandRepository.save(dispatchCommand);
+                    actions.add("警告：停止命令发送失败: " + e.getMessage());
+                }
+            }
+        }
+
+        result.setRecommendedActions(actions);
+
+        Map<String, Object> additionalInfo = new HashMap<>();
+        additionalInfo.put("safetyInterlock", true);
+        additionalInfo.put("interlockReason", interlockReason);
+        additionalInfo.put("triggeredAlarms", triggeredAlarms);
+        additionalInfo.put("alarmMessages", alarmMessages);
+        additionalInfo.put("alarmResult", alarmResult);
+        result.setAdditionalInfo(additionalInfo);
+
+        return result;
     }
 }
